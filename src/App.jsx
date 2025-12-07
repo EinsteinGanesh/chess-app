@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
+import ChessboardJS from './components/ChessboardJS'; // Import the new wrapper
 import {
   History, Upload, Play, RotateCcw, ChevronLeft, ChevronRight,
   MessageSquare, Cpu, Settings, X, Send, AlertTriangle, CheckCircle, HelpCircle
@@ -60,9 +61,30 @@ function App() {
   const [bestLine, setBestLine] = useState('');
   const [isEngineReady, setIsEngineReady] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [moveAnalyses, setMoveAnalyses] = useState({}); // { index: { pre: {cp, mate}, post: {cp, mate}, classification: '...' } }
+  const [analysisQueue, setAnalysisQueue] = useState([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   // AI Coach State
-  const [apiKey, setApiKey] = useState('');
+  // AI Coach State
+  const [apiKey, setApiKey] = useState(() => {
+    try {
+      const saved = localStorage.getItem('gemini_api_key');
+      return saved ? atob(saved) : '';
+    } catch (e) {
+      return '';
+    }
+  });
+
+  const saveApiKey = (key) => {
+    setApiKey(key);
+    try {
+      if (key) localStorage.setItem('gemini_api_key', btoa(key));
+      else localStorage.removeItem('gemini_api_key');
+    } catch (e) {
+      console.error("Failed to save key", e);
+    }
+  }
   const [chatHistory, setChatHistory] = useState([{ role: 'model', text: "Hello! I'm your AI Chess Coach. Load a game or make a move, and I'll help you analyze it!" }]);
   const [chatInput, setChatInput] = useState('');
   const [isChatLoading, setIsChatLoading] = useState(false);
@@ -76,54 +98,26 @@ function App() {
 
   //random FEN positions functions
 
-  // generate random FEN position
+  // generate random FEN position by playing random moves
   function generateRandomFen() {
-    const pieces = ['r', 'n', 'b', 'q', 'k', 'p', 'R', 'N', 'B', 'Q', 'K', 'P'];
-    let newFen = '';
+    const game = new Chess();
+    game.reset();
+    const movesToPlay = Math.floor(Math.random() * 40) + 10; // Play between 10 and 50 moves
 
-    // create 8 rows of random pieces
-    for (let i = 0; i < 8; i++) {
-      let emptyCount = 0;
-
-      // create 8 columns of random pieces or empty squares
-      for (let j = 0; j < 8; j++) {
-        if (Math.random() < 0.2) {
-          if (emptyCount > 0) {
-            newFen += emptyCount;
-            emptyCount = 0;
-          }
-          newFen += pieces[Math.floor(Math.random() * pieces.length)];
-        } else {
-          emptyCount++;
-        }
-      }
-
-      // add empty count to FEN string if there are empty squares
-      if (emptyCount > 0) {
-        newFen += emptyCount;
-      }
-
-      // add slash between rows
-      if (i < 7) {
-        newFen += '/';
-      }
+    for (let i = 0; i < movesToPlay; i++) {
+      const moves = game.moves();
+      if (moves.length === 0) break; // Checkmate or stalemate
+      const randomMove = moves[Math.floor(Math.random() * moves.length)];
+      game.move(randomMove);
     }
 
-    // Add turn and castling rights to make it a valid FEN for chess.js (strictly speaking)
-    newFen += " w - - 0 1";
-
-    try {
-      const game = gameRef.current;
-      game.load(newFen);
-      setFen(game.fen());
-      setHistory([]);
-      setCurrentMoveIndex(-1);
-      setEvaluation(null);
-      setBestLine('');
-    } catch (e) {
-      // If random FEN is invalid, just retry
-      generateRandomFen();
-    }
+    const newFen = game.fen();
+    gameRef.current.load(newFen); // <--- SYNC GAME REF
+    setFen(newFen);
+    setHistory(game.history({ verbose: true }));
+    setCurrentMoveIndex(game.history().length - 1);
+    setEvaluation(null);
+    setBestLine('');
   }
 
   // --- Engine Initialization ---
@@ -142,9 +136,55 @@ function App() {
         const pvMatch = msg.match(/ pv (.+)/);
 
         if (cpMatch || mateMatch) {
-          setEvaluation({
+          const newEval = {
             cp: cpMatch ? parseInt(cpMatch[1]) : null,
             mate: mateMatch ? parseInt(mateMatch[1]) : null,
+          };
+          setEvaluation(newEval);
+
+          // Update analysis for current move if we are at the latest position or reviewing
+          setCurrentMoveIndex(idx => {
+            if (idx >= 0) {
+              setMoveAnalyses(prev => {
+                const currentAnalysis = prev[idx] || {};
+                // If we already have a classification that is "final" maybe don't overwrite? 
+                // But engine refines depth, so overwriting is good for accuracy.
+
+                // Calculate Loss / Classification
+                // Loss = PreCP + PostCP (since perspectives flip)
+                let classification = null;
+                let loss = null;
+
+                if (currentAnalysis.pre && newEval) {
+                  // Handle Checks/Mates complexities - simplified for CP
+                  if (currentAnalysis.pre.cp !== null && newEval.cp !== null) {
+                    loss = currentAnalysis.pre.cp + newEval.cp; // Sum because perspectives are opposite
+
+                    // Classification logic
+                    // Note: "Good" for user means LOSS is LOW.
+                    // If loss is negative (we improved??), it's a blunder by opponent that we capitalized on? 
+                    // Or engine changed its mind.
+                    // Generally Loss > 0 means we lost advantage.
+
+                    if (loss <= 50) classification = 'good';
+                    else if (loss <= 150) classification = 'inaccuracy';
+                    else if (loss <= 300) classification = 'mistake';
+                    else classification = 'blunder';
+                  }
+                }
+
+                return {
+                  ...prev,
+                  [idx]: {
+                    ...currentAnalysis,
+                    post: newEval,
+                    loss,
+                    classification
+                  }
+                };
+              });
+            }
+            return idx;
           });
         }
         if (pvMatch) {
@@ -153,6 +193,7 @@ function App() {
       }
     };
     worker.postMessage('uci');
+    worker.postMessage('setoption name Hash value 64');
     setEngine(worker);
     return () => worker.terminate();
   }, []);
@@ -191,8 +232,21 @@ function App() {
 
       if (result) {
         setFen(game.fen());
-        setHistory(game.history({ verbose: true }));
-        setCurrentMoveIndex(prev => prev + 1);
+        const newHistory = game.history({ verbose: true });
+        setHistory(newHistory);
+
+        const newMoveIndex = newHistory.length - 1;
+        setCurrentMoveIndex(newMoveIndex);
+
+        // Record Pre-Move Evaluation
+        setMoveAnalyses(prev => ({
+          ...prev,
+          [newMoveIndex]: {
+            pre: evaluation, // evaluation of the position BEFORE this move
+            san: move.san
+          }
+        }));
+
         setMoveSquares({
           [move.from]: { backgroundColor: 'rgba(255, 255, 0, 0.4)' },
           [move.to]: { backgroundColor: 'rgba(255, 255, 0, 0.4)' }
@@ -373,6 +427,55 @@ function App() {
     setBestLine('');
   }
 
+  // --- Batch Analysis Logic ---
+  const analyzingIndexRef = useRef(null); // Tracks which FEN index (0..N) we are analyzing
+
+  // Helper to process eval results
+  const handleAnalysisResult = (fenIndex, newEval) => {
+    setMoveAnalyses(prev => {
+      const next = { ...prev };
+
+      if (fenIndex < history.length) {
+        const moveIdx = fenIndex;
+        next[moveIdx] = { ...next[moveIdx], pre: newEval };
+      }
+
+      if (fenIndex > 0) {
+        const moveIdx = fenIndex - 1;
+        next[moveIdx] = { ...next[moveIdx], post: newEval };
+
+        const analysis = next[moveIdx];
+        if (analysis.pre && analysis.post && analysis.pre.cp !== null && analysis.post.cp !== null) {
+          const loss = analysis.pre.cp + analysis.post.cp;
+
+          let classification = 'good';
+          if (loss > 300) classification = 'blunder';
+          else if (loss > 100) classification = 'mistake';
+          else if (loss > 50) classification = 'inaccuracy';
+
+          next[moveIdx].classification = classification;
+          next[moveIdx].loss = loss;
+        }
+      }
+      return next;
+    });
+  };
+
+  const startBatchAnalysis = () => {
+    setMoveAnalyses({});
+    const fens = [];
+    const game = new Chess();
+    fens.push({ index: 0, fen: game.fen() });
+
+    for (let i = 0; i < history.length; i++) {
+      game.move(history[i]);
+      fens.push({ index: i + 1, fen: game.fen() });
+    }
+
+    setAnalysisQueue(fens);
+    setIsAnalyzing(true);
+  };
+
   useEffect(() => {
     if (playMode && gameRef.current.turn() === aiColor && !gameRef.current.isGameOver()) {
       // AI's turn
@@ -394,10 +497,48 @@ function App() {
     const originalOnMessage = engine.onmessage;
     engine.onmessage = (e) => {
       const msg = e.data;
+      if (msg.startsWith('info depth')) {
+        const depth = parseInt(msg.split('depth ')[1].split(' ')[0]);
+        let score = 0;
+        let mate = null;
+        if (msg.includes('mate')) {
+          mate = parseInt(msg.split('mate ')[1].split(' ')[0]);
+        } else if (msg.includes('cp')) {
+          score = parseInt(msg.split('cp ')[1].split(' ')[0]);
+        }
+
+        const newEval = { cp: score, mate };
+        setEvaluation(newEval); // Update UI bar always
+
+        // Update Analysis Data
+        // If we are batch analyzing, we need to know WHICH position this is.
+        // We can track 'analyzingIndex' in state or ref.
+        if (analyzingIndexRef.current !== null) {
+          handleAnalysisResult(analyzingIndexRef.current, newEval);
+        } else {
+          // Live analysis (currentMoveIndex)
+          // Existing logic...
+          // Actually, let's unify.
+          // If analyzingIndexRef is set, usage it. Else usage currentMoveIndex?
+          // "Live" analysis happens on 'makeMove'.
+          // The existing 'makeMove' logic stored 'pre' evaluation. 
+          // It relies on 'evaluation' state being fresh.
+
+          // To support batch, we need to explicitly link the eval to the index.
+        }
+      }
+
       if (msg.startsWith('bestmove')) {
         const move = msg.split(' ')[1];
-        if (playMode && gameRef.current.turn() === aiColor) {
+        if (playMode && gameRef.current.turn() === aiColor && !isAnalyzing) {
           makeMove({ from: move.substring(0, 2), to: move.substring(2, 4), promotion: 'q' });
+        }
+
+        // Trigger next if batch
+        if (isAnalyzing && analyzingIndexRef.current !== null) {
+          const finishedIndex = analyzingIndexRef.current;
+          analyzingIndexRef.current = null; // Clear
+          setAnalysisQueue(q => q.slice(1)); // Remove task, triggering effect
         }
       }
       if (originalOnMessage) originalOnMessage(e);
@@ -406,8 +547,27 @@ function App() {
     return () => {
       engine.onmessage = originalOnMessage;
     };
-  }, [engine, playMode, aiColor]); // Removed 'game' dependency
+  }, [engine, playMode, aiColor]);
 
+
+
+  // Processor
+  useEffect(() => {
+    if (!isAnalyzing) return;
+    if (analysisQueue.length === 0) {
+      setIsAnalyzing(false);
+      analyzingIndexRef.current = null;
+      return;
+    }
+
+    const task = analysisQueue[0];
+    analyzingIndexRef.current = task.index;
+
+    if (engine) {
+      engine.postMessage(`position fen ${task.fen}`);
+      engine.postMessage('go depth 10');
+    }
+  }, [analysisQueue, isAnalyzing, engine]);
 
   // --- AI Coach Logic ---
   async function sendToGemini(prompt) {
@@ -469,29 +629,11 @@ function App() {
 
   // chessboard options
   const chessboardOptions = {
-    position: fen,
-    onPieceDrop: onDrop,
-    onSquareClick: onSquareClick,
-    onPieceDragBegin: (piece, sourceSquare) => console.log("Drag begin:", piece, sourceSquare),
-    onSquareRightClick: onSquareRightClick,
-    boardOrientation: orientation,
-    customDarkSquareStyle: { backgroundColor: '#779556' },
-    customLightSquareStyle: { backgroundColor: '#ebecd0' },
-    customSquareStyles: {
-      ...moveSquares,
-      ...optionSquares,
-      ...rightClickedSquares,
-    },
-    // Arrows for best move
-    customArrows: bestLine && bestLine.split(' ').length > 0 ? [
-      [
-        bestLine.split(' ')[0].substring(0, 2), // from
-        bestLine.split(' ')[0].substring(2, 4), // to
-        'rgb(0, 128, 0)' // green color
-      ]
-    ] : [],
-    arePiecesDraggable: true,
-    animationDuration: showAnimations ? 300 : 0, // Using showAnimations state for duration
+    fen: fen, // Changed from position to fen
+    onDrop: onDrop,
+    orientation: orientation,
+    draggable: true,
+    // Removed custom styles/arrows as they are not supported by chessboard.js wrapper yet
   };
 
   // --- Render ---
@@ -527,7 +669,7 @@ function App() {
           <input
             type="password"
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => saveApiKey(e.target.value)}
             className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm mb-3 focus:outline-none focus:border-primary"
             placeholder="Enter key..."
           />
@@ -575,16 +717,32 @@ function App() {
                     {i % 2 === 0 && <div className="text-gray-500 text-right font-mono">{(i / 2 + 1)}.</div>}
                     <button
                       className={clsx(
-                        "text-left px-2 rounded hover:bg-gray-800 transition-colors font-medium",
+                        "text-left px-2 rounded hover:bg-gray-800 transition-colors font-medium flex justify-between items-center group",
                         currentMoveIndex === i ? "bg-primary/20 text-primary" : "text-gray-300"
                       )}
                       onClick={() => jumpToMove(i)}
                     >
-                      {move.san}
+                      <span>{move.san}</span>
+                      {moveAnalyses[i]?.classification && (
+                        <span className={clsx(
+                          "text-[10px] px-1 rounded uppercase font-bold",
+                          moveAnalyses[i].classification === 'good' && "text-green-500",
+                          moveAnalyses[i].classification === 'inaccuracy' && "text-yellow-500",
+                          moveAnalyses[i].classification === 'mistake' && "text-orange-500",
+                          moveAnalyses[i].classification === 'blunder' && "text-red-500",
+                        )}>
+                          {moveAnalyses[i].classification === 'good' && '★'}
+                          {moveAnalyses[i].classification === 'inaccuracy' && '?!'}
+                          {moveAnalyses[i].classification === 'mistake' && '?'}
+                          {moveAnalyses[i].classification === 'blunder' && '??'}
+                        </span>
+                      )}
                     </button>
                   </React.Fragment>
                 ))}
               </div>
+
+              {/* Legend Removed as requested */}
             </div>
           </Card>
 
@@ -639,8 +797,9 @@ function App() {
         {/* Center Panel: Board */}
         <div className="flex-1 bg-gray-950 flex flex-col items-center justify-center p-4 relative">
           <div className="w-full h-full flex flex-col items-center justify-center">
-            <div className="w-full max-w-[500px] aspect-square shadow-2xl shadow-black/50 rounded-lg border-4 border-gray-800">
-              <Chessboard {...chessboardOptions} />
+            <div className="w-full max-w-[500px] aspect-square shadow-2xl shadow-black/50 rounded-lg border-4 border-gray-800 bg-[#b58863]">
+              {/* Use Custom Wrapper */}
+              <ChessboardJS {...chessboardOptions} width={500} />
             </div>
 
             {/* Evaluation Bar & Info */}
@@ -706,6 +865,16 @@ function App() {
                   <MessageSquare size={16} /> Ask Coach about this move
                 </Button>
               )}
+              {history.length > 0 && !isAnalyzing && (
+                <Button size="sm" variant="primary" onClick={startBatchAnalysis} className="w-full justify-center mt-2">
+                  <Cpu size={16} /> Computer Analysis
+                </Button>
+              )}
+              {isAnalyzing && (
+                <div className="text-xs text-center text-primary animate-pulse">
+                  Analyzing... {Math.round((1 - analysisQueue.length / (history.length + 1)) * 100)}%
+                </div>
+              )}
             </div>
           </Card>
 
@@ -737,10 +906,10 @@ function App() {
               <Button type="submit" variant="primary" className="px-3"><Send size={16} /></Button>
             </form>
           </Card>
-        </div>
+        </div >
 
-      </main>
-    </div>
+      </main >
+    </div >
   );
 }
 
