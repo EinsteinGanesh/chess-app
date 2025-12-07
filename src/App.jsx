@@ -48,8 +48,8 @@ function Card({ children, className, title, icon: Icon }) {
 // --- Main App Component ---
 function App() {
   // Game State
-  const [game, setGame] = useState(new Chess());
-  const [fen, setFen] = useState(game.fen());
+  const gameRef = useRef(new Chess());
+  const [fen, setFen] = useState(gameRef.current.fen());
   const [history, setHistory] = useState([]);
   const [currentMoveIndex, setCurrentMoveIndex] = useState(-1); // -1 = start
   const [orientation, setOrientation] = useState('white');
@@ -69,6 +69,62 @@ function App() {
 
   // UI State
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
+
+  //for animation
+
+  const [showAnimations, setShowAnimations] = useState(true);
+
+  //random FEN positions functions
+
+  // generate random FEN position
+  function generateRandomFen() {
+    const pieces = ['r', 'n', 'b', 'q', 'k', 'p', 'R', 'N', 'B', 'Q', 'K', 'P'];
+    let newFen = '';
+
+    // create 8 rows of random pieces
+    for (let i = 0; i < 8; i++) {
+      let emptyCount = 0;
+
+      // create 8 columns of random pieces or empty squares
+      for (let j = 0; j < 8; j++) {
+        if (Math.random() < 0.2) {
+          if (emptyCount > 0) {
+            newFen += emptyCount;
+            emptyCount = 0;
+          }
+          newFen += pieces[Math.floor(Math.random() * pieces.length)];
+        } else {
+          emptyCount++;
+        }
+      }
+
+      // add empty count to FEN string if there are empty squares
+      if (emptyCount > 0) {
+        newFen += emptyCount;
+      }
+
+      // add slash between rows
+      if (i < 7) {
+        newFen += '/';
+      }
+    }
+
+    // Add turn and castling rights to make it a valid FEN for chess.js (strictly speaking)
+    newFen += " w - - 0 1";
+
+    try {
+      const game = gameRef.current;
+      game.load(newFen);
+      setFen(game.fen());
+      setHistory([]);
+      setCurrentMoveIndex(-1);
+      setEvaluation(null);
+      setBestLine('');
+    } catch (e) {
+      // If random FEN is invalid, just retry
+      generateRandomFen();
+    }
+  }
 
   // --- Engine Initialization ---
   useEffect(() => {
@@ -102,7 +158,11 @@ function App() {
   }, []);
 
   // Click-to-move state
-  const [selectedSquare, setSelectedSquare] = useState(null);
+  // Click-to-move state
+  const [moveFrom, setMoveFrom] = useState('');
+  const [rightClickedSquares, setRightClickedSquares] = useState({});
+  const [moveSquares, setMoveSquares] = useState({});
+  const [optionSquares, setOptionSquares] = useState({});
 
   // --- Engine Analysis Trigger ---
   useEffect(() => {
@@ -126,17 +186,17 @@ function App() {
   // --- Game Logic ---
   function makeMove(move) {
     try {
-      console.log("Attempting move:", move);
-      console.log("Current FEN:", game.fen());
-      const gameCopy = new Chess(game.fen());
-      const result = gameCopy.move(move);
-      console.log("Move result:", result);
+      const game = gameRef.current;
+      const result = game.move(move);
+
       if (result) {
-        setGame(gameCopy);
-        setFen(gameCopy.fen());
-        setHistory(gameCopy.history({ verbose: true }));
+        setFen(game.fen());
+        setHistory(game.history({ verbose: true }));
         setCurrentMoveIndex(prev => prev + 1);
-        setSelectedSquare(null); // Clear selection after move
+        setMoveSquares({
+          [move.from]: { backgroundColor: 'rgba(255, 255, 0, 0.4)' },
+          [move.to]: { backgroundColor: 'rgba(255, 255, 0, 0.4)' }
+        });
         return true;
       }
     } catch (e) {
@@ -156,35 +216,83 @@ function App() {
     return move;
   }
 
-  function onSquareClick(square) {
-    console.log("Square clicked:", square);
+  // Get move options for a square to show valid moves
+  function getMoveOptions(square) {
+    const moves = gameRef.current.moves({
+      square,
+      verbose: true
+    });
 
-    if (!selectedSquare) {
-      // First click - select piece
-      const piece = game.get(square);
-      if (piece && piece.color === game.turn()) {
-        console.log("Selected piece:", piece, "at", square);
-        setSelectedSquare(square);
-      }
-    } else {
-      // Second click - try to move
-      console.log("Trying to move from", selectedSquare, "to", square);
-      const success = makeMove({
-        from: selectedSquare,
-        to: square,
-        promotion: 'q',
-      });
-      if (!success) {
-        // If move failed, check if clicked on another piece of same color
-        const piece = game.get(square);
-        if (piece && piece.color === game.turn()) {
-          console.log("Selected different piece:", piece, "at", square);
-          setSelectedSquare(square);
-        } else {
-          setSelectedSquare(null);
-        }
-      }
+    // if no moves, clear the option squares
+    if (moves.length === 0) {
+      setOptionSquares({});
+      return false;
     }
+
+    // create a new object to store the option squares
+    const newSquares = {};
+
+    // loop through the moves and set the option squares
+    const game = gameRef.current;
+    for (const move of moves) {
+      newSquares[move.to] = {
+        background:
+          game.get(move.to) && game.get(move.to)?.color !== game.get(square)?.color
+            ? 'radial-gradient(circle, rgba(0,0,0,.1) 85%, transparent 85%)' // larger circle for capturing
+            : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)', // smaller circle for moving
+        borderRadius: '50%'
+      };
+    }
+
+    // set the square clicked to move from to yellow
+    newSquares[square] = {
+      background: 'rgba(255, 255, 0, 0.4)'
+    };
+
+    // set the option squares
+    setOptionSquares(newSquares);
+
+    // return true to indicate that there are move options
+    return true;
+  }
+
+  // square clicked to move to, check if valid move
+  const game = gameRef.current;
+  function onSquareClick(square) {
+    if (!moveFrom) {
+      const piece = game.get(square);
+      if (!piece) return;
+
+      const hasMoveOptions = getMoveOptions(square);
+      if (hasMoveOptions) setMoveFrom(square);
+      return;
+    }
+
+    const moves = game.moves({ square: moveFrom, verbose: true });
+    const foundMove = moves.find(m => m.from === moveFrom && m.to === square);
+
+    if (!foundMove) {
+      const hasMoveOptions = getMoveOptions(square);
+      setMoveFrom(hasMoveOptions ? square : '');
+      return;
+    }
+
+    const success = makeMove({ from: moveFrom, to: square, promotion: 'q' });
+    if (success) {
+      setMoveFrom('');
+      setOptionSquares({});
+    }
+  }
+
+  function onSquareRightClick(square) {
+    const colour = 'rgba(0, 0, 255, 0.4)';
+    setRightClickedSquares({
+      ...rightClickedSquares,
+      [square]:
+        rightClickedSquares[square] && rightClickedSquares[square].backgroundColor === colour
+          ? undefined
+          : { backgroundColor: colour }
+    });
   }
 
   // --- Game Loading Logic ---
@@ -207,24 +315,43 @@ function App() {
   // --- Play Mode Logic ---
   const [playMode, setPlayMode] = useState(false);
   const [aiColor, setAiColor] = useState('b'); // AI plays Black by default
+  const [pgnInput, setPgnInput] = useState('');
+  const [fenInput, setFenInput] = useState('');
 
   function loadPgn(pgn) {
     try {
-      const newGame = new Chess();
-      newGame.loadPgn(pgn);
-      setGame(newGame);
-      setFen(newGame.fen()); // Set to end of game
-      setHistory(newGame.history({ verbose: true }));
-      setCurrentMoveIndex(newGame.history().length - 1);
+      const game = gameRef.current;
+      game.loadPgn(pgn);
+      setFen(game.fen());
+      setHistory(game.history({ verbose: true }));
+      setCurrentMoveIndex(game.history().length - 1);
     } catch (e) {
       alert("Invalid PGN");
     }
   }
 
+  function loadFen(fen) {
+    try {
+      const game = gameRef.current;
+      // .load() usually returns true on success, but we can just call it 
+      // and catch any throw. If it returns false (v0.x), checks below might fail or be implicit.
+      game.load(fen);
+
+      setFen(game.fen());
+      setHistory([]);
+      setCurrentMoveIndex(-1);
+      setEvaluation(null);
+      setBestLine('');
+    } catch (e) {
+      console.error("FEN Load Error:", e);
+      alert("Invalid FEN string");
+    }
+  }
+
   function resetGame() {
-    const newGame = new Chess();
-    setGame(newGame);
-    setFen(newGame.fen());
+    const game = gameRef.current;
+    game.reset();
+    setFen(game.fen());
     setHistory([]);
     setCurrentMoveIndex(-1);
     setEvaluation(null);
@@ -232,73 +359,54 @@ function App() {
   }
 
   function jumpToMove(index) {
-    if (index < -1 || index >= history.length) return;
-
-    const newGame = new Chess();
-    // Replay moves up to index
+    const game = gameRef.current;
+    game.reset();
+    // Replay moves using the new gameRef
     for (let i = 0; i <= index; i++) {
-      // Use .san to ensure robust replay
-      if (history[i] && history[i].san) {
-        newGame.move(history[i].san);
-      } else {
-        // Fallback if history item is just a string or weird object
-        newGame.move(history[i]);
+      if (history[i]) {
+        game.move(history[i]);
       }
     }
-
-    setGame(newGame);
-    setFen(newGame.fen());
+    setFen(game.fen());
     setCurrentMoveIndex(index);
-
-    // Clear evaluation when jumping (or could re-analyze)
     setEvaluation(null);
     setBestLine('');
   }
 
   useEffect(() => {
-    if (playMode && game.turn() === aiColor && !game.isGameOver()) {
+    if (playMode && gameRef.current.turn() === aiColor && !gameRef.current.isGameOver()) {
       // AI's turn
       if (!engine) return;
 
-      // Small delay for realism
       const timeout = setTimeout(() => {
-        engine.postMessage(`position fen ${game.fen()}`);
-        engine.postMessage('go depth 10'); // Fast move
+        engine.postMessage(`position fen ${fen}`);
+        engine.postMessage('go depth 10');
       }, 500);
 
-      // We need to listen for the bestmove in the main worker listener
-      // But the main listener updates 'bestLine'. We need a specific listener for the move.
-      // Actually, let's just use the 'bestLine' or add a specific handler.
-      // For simplicity, let's modify the worker listener to handle 'bestmove'.
       return () => clearTimeout(timeout);
     }
-  }, [playMode, game, aiColor, engine]);
+  }, [playMode, fen, aiColor, engine]); // Removed 'game' dependency
 
-  // We need to update the worker listener to handle 'bestmove' for Play Mode
+  // Worker listener for moves
   useEffect(() => {
     if (!engine) return;
 
     const originalOnMessage = engine.onmessage;
-
     engine.onmessage = (e) => {
       const msg = e.data;
       if (msg.startsWith('bestmove')) {
         const move = msg.split(' ')[1];
-        if (playMode && game.turn() === aiColor) {
+        if (playMode && gameRef.current.turn() === aiColor) {
           makeMove({ from: move.substring(0, 2), to: move.substring(2, 4), promotion: 'q' });
         }
       }
-      // Call original listener for analysis updates
       if (originalOnMessage) originalOnMessage(e);
     };
 
     return () => {
       engine.onmessage = originalOnMessage;
     };
-  }, [engine, playMode, game, aiColor]); // Re-bind when game state changes to ensure closure has latest game? No, 'game' in makeMove needs to be latest.
-  // Actually, 'makeMove' uses 'game' from state, but inside the event listener closure, 'game' might be stale if we don't re-bind.
-  // Better approach: Use a ref for 'game' or 'playMode' if we want to avoid re-binding the heavy worker listener constantly.
-  // Or just rely on the fact that the effect re-runs.
+  }, [engine, playMode, aiColor]); // Removed 'game' dependency
 
 
   // --- AI Coach Logic ---
@@ -359,6 +467,33 @@ function App() {
     sendToGemini(prompt);
   }
 
+  // chessboard options
+  const chessboardOptions = {
+    position: fen,
+    onPieceDrop: onDrop,
+    onSquareClick: onSquareClick,
+    onPieceDragBegin: (piece, sourceSquare) => console.log("Drag begin:", piece, sourceSquare),
+    onSquareRightClick: onSquareRightClick,
+    boardOrientation: orientation,
+    customDarkSquareStyle: { backgroundColor: '#779556' },
+    customLightSquareStyle: { backgroundColor: '#ebecd0' },
+    customSquareStyles: {
+      ...moveSquares,
+      ...optionSquares,
+      ...rightClickedSquares,
+    },
+    // Arrows for best move
+    customArrows: bestLine && bestLine.split(' ').length > 0 ? [
+      [
+        bestLine.split(' ')[0].substring(0, 2), // from
+        bestLine.split(' ')[0].substring(2, 4), // to
+        'rgb(0, 128, 0)' // green color
+      ]
+    ] : [],
+    arePiecesDraggable: true,
+    animationDuration: showAnimations ? 300 : 0, // Using showAnimations state for duration
+  };
+
   // --- Render ---
   return (
     <div className="h-screen w-full bg-gray-900 text-gray-100 flex flex-col overflow-hidden">
@@ -369,6 +504,15 @@ function App() {
           <h1 className="text-xl font-bold tracking-tight">AI Chess Analyzer</h1>
         </div>
         <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-gray-300 mr-4 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showAnimations}
+              onChange={() => setShowAnimations(!showAnimations)}
+              className="rounded bg-gray-700 border-gray-600 text-primary focus:ring-primary"
+            />
+            Show Animations
+          </label>
           <Button variant="ghost" onClick={() => setShowApiKeyInput(!showApiKeyInput)}>
             <Settings size={18} />
             {apiKey ? 'API Key Set' : 'Set API Key'}
@@ -446,22 +590,49 @@ function App() {
 
           <div className="p-4 border-t border-gray-800 space-y-2">
             <h3 className="text-xs font-semibold text-gray-500 uppercase">Load Game</h3>
-            <div className="flex gap-2">
-              <input
-                id="lichess-username"
-                className="flex-1 bg-gray-800 border-none rounded px-3 py-2 text-sm focus:ring-1 focus:ring-primary"
-                placeholder="Lichess Username"
-                onKeyDown={(e) => e.key === 'Enter' && fetchLichessGames(e.target.value)}
+
+            {/* PGN Load */}
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  id="lichess-username"
+                  className="flex-1 bg-gray-800 border-none rounded px-3 py-2 text-sm focus:ring-1 focus:ring-primary"
+                  placeholder="Lichess Username"
+                  onKeyDown={(e) => e.key === 'Enter' && fetchLichessGames(e.target.value)}
+                />
+                <Button variant="secondary" className="px-3" onClick={() => fetchLichessGames(document.getElementById('lichess-username').value)}>
+                  <Upload size={16} />
+                </Button>
+                <button onClick={generateRandomFen} className="bg-gray-700 hover:bg-gray-600 text-gray-200 p-2 rounded" title="Random FEN">
+                  <RotateCcw size={16} />
+                </button>
+              </div>
+
+              <textarea
+                className="w-full bg-gray-800 border-none rounded p-3 text-xs font-mono h-24 resize-none focus:ring-1 focus:ring-primary"
+                placeholder="Paste PGN here..."
+                value={pgnInput}
+                onChange={(e) => setPgnInput(e.target.value)}
               />
-              <Button variant="secondary" className="px-3" onClick={() => fetchLichessGames(document.getElementById('lichess-username').value)}>
-                <Upload size={16} />
+              <Button size="sm" variant="secondary" className="w-full justify-center" onClick={() => loadPgn(pgnInput)}>
+                <Play size={16} /> Load PGN
               </Button>
             </div>
-            <textarea
-              className="w-full bg-gray-800 border-none rounded p-3 text-xs font-mono h-24 resize-none focus:ring-1 focus:ring-primary"
-              placeholder="Paste PGN here..."
-              onBlur={(e) => e.target.value && loadPgn(e.target.value)}
-            />
+
+            <div className="h-px bg-gray-800 my-2" />
+
+            {/* FEN Load */}
+            <div className="space-y-2">
+              <input
+                className="w-full bg-gray-800 border-none rounded px-3 py-2 text-xs font-mono focus:ring-1 focus:ring-primary"
+                placeholder="Paste FEN position..."
+                value={fenInput}
+                onChange={(e) => setFenInput(e.target.value)}
+              />
+              <Button size="sm" variant="secondary" className="w-full justify-center" onClick={() => loadFen(fenInput)}>
+                <CheckCircle size={16} /> Load FEN
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -469,29 +640,34 @@ function App() {
         <div className="flex-1 bg-gray-950 flex flex-col items-center justify-center p-4 relative">
           <div className="w-full h-full flex flex-col items-center justify-center">
             <div className="w-full max-w-[500px] aspect-square shadow-2xl shadow-black/50 rounded-lg border-4 border-gray-800">
-              <Chessboard
-                position={fen}
-                onPieceDrop={onDrop}
-                onPieceDragBegin={(piece, sourceSquare) => console.log("Drag begin:", piece, sourceSquare)}
-                boardOrientation={orientation}
-                customDarkSquareStyle={{ backgroundColor: '#779556' }}
-                customLightSquareStyle={{ backgroundColor: '#ebecd0' }}
-                arePiecesDraggable={true}
-              />
+              <Chessboard {...chessboardOptions} />
             </div>
 
-            {/* Evaluation Bar (Simple) */}
-            <div className="mt-6 w-full max-w-[600px] bg-gray-800 h-2 rounded-full overflow-hidden flex shrink-0">
-              <div
-                className="bg-white h-full transition-all duration-500"
-                style={{
-                  width: `${Math.min(Math.max(50 + (evaluation?.cp || 0) / 10, 5), 95)}%`
-                }}
-              />
-            </div>
-            <div className="mt-2 text-sm font-mono text-gray-400 flex justify-between w-full max-w-[600px] shrink-0">
-              <span>Eval: {evaluation ? (evaluation.cp ? (evaluation.cp > 0 ? '+' : '') + (evaluation.cp / 100).toFixed(2) : `M${evaluation.mate}`) : '...'}</span>
-              <span className="truncate max-w-[300px]">{bestLine}</span>
+            {/* Evaluation Bar & Info */}
+            <div className="mt-6 w-full max-w-[500px] flex flex-col gap-2">
+              <div className="bg-gray-800 h-2 rounded-full overflow-hidden w-full">
+                <div
+                  className="bg-white h-full transition-all duration-500"
+                  style={{
+                    width: `${Math.min(Math.max(50 + (evaluation?.cp || 0) / 10, 5), 95)}%`
+                  }}
+                />
+              </div>
+              <div className="text-sm text-gray-300 font-mono space-y-1">
+                <div>
+                  <span className="font-bold text-gray-500">Evaluation:</span>{' '}
+                  {evaluation ? (evaluation.cp ? (evaluation.cp > 0 ? '+' : '') + (evaluation.cp / 100).toFixed(2) : `#${evaluation.mate}`) : '...'}
+                  <span className="mx-2 text-gray-600">|</span>
+                  <span className="font-bold text-gray-500">Depth:</span> 15
+                </div>
+                <div>
+                  <span className="font-bold text-gray-500">Best line:</span>{' '}
+                  <span className="text-primary italic">{bestLine.slice(0, 40)}{bestLine.length > 40 ? '...' : ''}</span>
+                </div>
+              </div>
+              <p className="text-xs text-gray-600 mt-2">
+                The green arrow shows Stockfish's suggested best move.
+              </p>
             </div>
 
             {/* Navigation Controls */}
