@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Chess } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import ChessboardJS from './components/ChessboardJS'; // Import the new wrapper
+import ArrowOverlay from './components/ArrowOverlay';
 import {
   History, Upload, Play, RotateCcw, ChevronLeft, ChevronRight,
   MessageSquare, Cpu, Settings, X, Send, AlertTriangle, CheckCircle, HelpCircle
@@ -9,6 +10,7 @@ import {
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import clsx from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import puzzlesData from './data/puzzles.json';
 
 // --- Utility Components ---
 function Button({ children, onClick, variant = 'primary', className, disabled }) {
@@ -64,6 +66,42 @@ function App() {
   const [moveAnalyses, setMoveAnalyses] = useState({}); // { index: { pre: {cp, mate}, post: {cp, mate}, classification: '...' } }
   const [analysisQueue, setAnalysisQueue] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  // Puzzle State
+  const [appMode, setAppMode] = useState('analysis'); // 'analysis' | 'puzzle'
+  const [puzzles, setPuzzles] = useState(puzzlesData);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState('');
+
+  const [puzzleState, setPuzzleState] = useState({
+    currentPuzzle: null,
+    index: 0,
+    status: 'idle', // 'idle' | 'solving' | 'solved' | 'failed'
+    userRating: 1200,
+    message: ''
+  });
+
+  // Arrows State
+  const [manualArrows, setManualArrows] = useState([]); // Array of {from, to, color}
+  const [rightClickStart, setRightClickStart] = useState(null); // {square, x, y}
+  const [engineArrow, setEngineArrow] = useState(null);
+
+  // Update engine arrow from bestLine
+  useEffect(() => {
+    if (bestLine) {
+      const moves = bestLine.split(' ');
+      if (moves.length > 0) {
+        const bestMove = moves[0];
+        // simplistic parse: first 2 chars from, next 2 chars to. 
+        // promotion is 5th char but doesn't affect arrow coords logic usually.
+        const from = bestMove.substring(0, 2);
+        const to = bestMove.substring(2, 4);
+        setEngineArrow({ from, to, color: 'rgba(0, 255, 0, 0.6)' }); // Green arrow
+        return;
+      }
+    }
+    setEngineArrow(null);
+  }, [bestLine]);
 
   // AI Coach State
   // AI Coach State
@@ -262,6 +300,12 @@ function App() {
 
   function onDrop(sourceSquare, targetSquare) {
     console.log("onDrop:", sourceSquare, targetSquare);
+
+    if (appMode === 'puzzle') {
+      const success = handlePuzzleMove(sourceSquare, targetSquare);
+      return success;
+    }
+
     const move = makeMove({
       from: sourceSquare,
       to: targetSquare,
@@ -338,16 +382,85 @@ function App() {
     }
   }
 
-  function onSquareRightClick(square) {
-    const colour = 'rgba(0, 0, 255, 0.4)';
-    setRightClickedSquares({
-      ...rightClickedSquares,
-      [square]:
-        rightClickedSquares[square] && rightClickedSquares[square].backgroundColor === colour
-          ? undefined
-          : { backgroundColor: colour }
-    });
-  }
+
+  // --- Arrow / Right Click Interaction ---
+
+  const getSquareFromEvent = (e, domRect) => {
+    const x = e.clientX - domRect.left;
+    const y = e.clientY - domRect.top;
+
+    // 0..1 relative pos
+    const relX = x / domRect.width;
+    const relY = y / domRect.height;
+
+    let col = Math.floor(relX * 8);
+    let row = Math.floor(relY * 8);
+
+    // Clamp
+    if (col < 0) col = 0; if (col > 7) col = 7;
+    if (row < 0) row = 0; if (row > 7) row = 7;
+
+    // Convert to square
+    const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    const ranks = ['1', '2', '3', '4', '5', '6', '7', '8'];
+
+    let fileIndex = col;
+    let rankIndex = 7 - row; // row 0 is top (rank 8), row 7 is bottom (rank 1)
+
+    if (orientation === 'black') {
+      fileIndex = 7 - col; // Left is 'h'
+      rankIndex = row;     // Top is '1'
+    }
+
+    return files[fileIndex] + ranks[rankIndex];
+  };
+
+  const handleBoardContextMenu = (e) => {
+    e.preventDefault();
+  };
+
+  const handleBoardMouseDown = (e) => {
+    if (e.button === 2) { // Right click
+      const rect = e.currentTarget.getBoundingClientRect();
+      const square = getSquareFromEvent(e, rect);
+      setRightClickStart(square);
+    } else {
+      // Left click clears arrows often
+      setManualArrows([]);
+      setRightClickStart(null);
+    }
+  };
+
+  const handleBoardMouseUp = (e) => {
+    if (e.button === 2 && rightClickStart) { // Right click release
+      const rect = e.currentTarget.getBoundingClientRect();
+      const square = getSquareFromEvent(e, rect);
+
+      if (rightClickStart === square) {
+        // Click on same square -> Clear arrows or circle? 
+        // For now, let's just clear arrows if you click same square,
+        // or maybe we implement circles later.
+        // User requested "make arrow", so focus on drag.
+        // If click same square, maybe do nothing or remove arrows involved?
+        // Let's toggle red arrow if from==to? No that's a circle.
+
+        // Let's implement toggle logic if not dragging
+      } else {
+        // Dragged from A to B
+        const newArrow = { from: rightClickStart, to: square, color: 'orange' };
+
+        // Toggle: if exists, remove. Else add.
+        setManualArrows(prev => {
+          const exists = prev.find(a => a.from === rightClickStart && a.to === square);
+          if (exists) {
+            return prev.filter(a => a !== exists);
+          }
+          return [...prev, newArrow];
+        });
+      }
+      setRightClickStart(null);
+    }
+  };
 
   // --- Game Loading Logic ---
   async function fetchLichessGames(username) {
@@ -368,7 +481,18 @@ function App() {
 
   // --- Play Mode Logic ---
   const [playMode, setPlayMode] = useState(false);
-  const [aiColor, setAiColor] = useState('b'); // AI plays Black by default
+  const [userColor, setUserColorState] = useState('w'); // 'w' or 'b'
+
+  // Derived AI color (always opposite of user)
+  const aiColor = userColor === 'w' ? 'b' : 'w';
+
+  // Wrapper to handle side effects of changing color
+  const setUserColor = (color) => {
+    setUserColorState(color);
+    setOrientation(color === 'w' ? 'white' : 'black');
+    resetGame();
+  };
+
   const [pgnInput, setPgnInput] = useState('');
   const [fenInput, setFenInput] = useState('');
 
@@ -410,6 +534,156 @@ function App() {
     setCurrentMoveIndex(-1);
     setEvaluation(null);
     setBestLine('');
+  }
+
+  // --- Puzzle Logic ---
+
+  function loadPuzzle(index) {
+    if (index < 0 || index >= puzzles.length) return;
+
+    const puzzle = puzzles[index];
+    const game = gameRef.current;
+
+    game.load(puzzle.FEN);
+    setFen(game.fen());
+    setHistory([]);
+    setCurrentMoveIndex(-1);
+    setEvaluation(null);
+    setBestLine('');
+    setMoveAnalyses({});
+    setManualArrows([]);
+
+    const turn = game.turn();
+    const userSide = turn === 'w' ? 'white' : 'black';
+    setOrientation(userSide);
+    setUserColorState(turn); // Ensure logic matches
+
+    setPuzzleState(prev => ({
+      ...prev,
+      currentPuzzle: puzzle,
+      index: index,
+      status: 'solving',
+      message: 'Find the best move!',
+      moveIndex: 0 // Track which move in the solution we are expected to play
+    }));
+  }
+
+  const nextPuzzle = () => loadPuzzle(puzzleState.index + 1);
+
+  function handlePuzzleMove(source, target) {
+    const { currentPuzzle, moveIndex, status } = puzzleState;
+    if (status !== 'solving' || !currentPuzzle) return false;
+
+    const game = gameRef.current;
+
+    const puzzleMoves = currentPuzzle.Moves.split(' '); // e.g. "f2g3 e6e7 ..."
+    const expectedMoveStr = puzzleMoves[moveIndex]; // e.g. "f2g3"
+
+    // User move in UCI format
+    const userMoveUci = source + target;
+
+    // If Correct
+    if (userMoveUci === expectedMoveStr || (expectedMoveStr.length === 5 && userMoveUci === expectedMoveStr.substring(0, 4))) {
+
+      // Make the move visually
+      makeMove({ from: source, to: target, promotion: 'q' }); // Actual game move
+
+      // Check if puzzle ended
+      if (moveIndex + 1 >= puzzleMoves.length) {
+        setPuzzleState(prev => ({
+          ...prev,
+          status: 'solved',
+          message: 'Solved! +10 Rating',
+          userRating: prev.userRating + 10
+        }));
+      } else {
+        // Opponent's Turn (Automated)
+        setPuzzleState(prev => ({ ...prev, moveIndex: prev.moveIndex + 1, message: 'Good move...' }));
+
+        setTimeout(() => {
+          const opponentMoveStr = puzzleMoves[moveIndex + 1];
+          const from = opponentMoveStr.substring(0, 2);
+          const to = opponentMoveStr.substring(2, 4);
+          const promo = opponentMoveStr.length === 5 ? opponentMoveStr[4] : 'q';
+
+          makeMove({ from, to, promotion: promo });
+
+          // Set up for next user move
+          setPuzzleState(prev => {
+            const nextIndex = prev.moveIndex + 1; // We just played opponent move
+            if (nextIndex + 1 >= puzzleMoves.length) {
+              return {
+                ...prev,
+                status: 'solved',
+                message: 'Solved! +10 Rating',
+                userRating: prev.userRating + 10,
+                moveIndex: nextIndex
+              };
+            }
+            return {
+              ...prev,
+              moveIndex: nextIndex,
+              message: 'your turn...'
+            };
+          });
+        }, 500);
+      }
+      return true;
+    } else {
+      // WRONG MOVE
+      setPuzzleState(prev => ({
+        ...prev,
+        status: 'failed',
+        message: 'Wrong move! -10 Rating',
+        userRating: prev.userRating - 10
+      }));
+
+      return false; // Snapback
+    }
+  }
+
+  function handleImport() {
+    if (!importText.trim()) return;
+
+    const lines = importText.trim().split('\n');
+    const newPuzzles = [];
+
+    // Attempt to parse TSV/Excel copy-paste
+    // Format usually: PuzzleId | FEN | Moves | Rating ...
+    // We expect at least FEN and Moves.
+
+    for (const line of lines) {
+      const parts = line.split(/\t/); // Split by tab
+      if (parts.length >= 3) {
+        // Heuristic: Check if parts[1] looks like FEN (contains / and digits)
+        // or parts[0] is ID.
+        // Screenshot format: PuzzleId, FEN, Moves, Rating...
+        const pid = parts[0].trim();
+        const fen = parts[1].trim();
+        const moves = parts[2].trim();
+        const rating = parseInt(parts[3]) || 1200;
+        const themes = parts[5] || '';
+
+        if (fen.includes('/')) {
+          newPuzzles.push({
+            PuzzleId: pid,
+            FEN: fen,
+            Moves: moves,
+            Rating: rating,
+            Themes: themes
+          });
+        }
+      }
+    }
+
+    if (newPuzzles.length > 0) {
+      setPuzzles(prev => [...prev, ...newPuzzles]);
+      setShowImportModal(false);
+      setImportText('');
+      alert(`Imported ${newPuzzles.length} puzzles!`);
+    } else {
+      alert("Could not parse puzzles. Ensure you pasted Excel data with columns: ID, FEN, Moves, Rating...");
+    }
   }
 
   function jumpToMove(index) {
@@ -477,16 +751,20 @@ function App() {
   };
 
   useEffect(() => {
-    if (playMode && gameRef.current.turn() === aiColor && !gameRef.current.isGameOver()) {
-      // AI's turn
-      if (!engine) return;
+    if (playMode && !gameRef.current.isGameOver()) {
+      const turn = gameRef.current.turn();
+      // If it's AI's turn
+      if (turn === aiColor) {
+        if (!engine) return;
 
-      const timeout = setTimeout(() => {
-        engine.postMessage(`position fen ${fen}`);
-        engine.postMessage('go depth 10');
-      }, 500);
+        // Add a small delay for realism
+        const timeout = setTimeout(() => {
+          engine.postMessage(`position fen ${fen}`);
+          engine.postMessage('go depth 10');
+        }, 500);
 
-      return () => clearTimeout(timeout);
+        return () => clearTimeout(timeout);
+      }
     }
   }, [playMode, fen, aiColor, engine]); // Removed 'game' dependency
 
@@ -677,6 +955,30 @@ function App() {
         </div>
       )}
 
+      {/* Import Modal */}
+      {showImportModal && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-gray-800 p-6 rounded-lg shadow-2xl border border-gray-700 w-[600px] flex flex-col gap-4">
+            <h3 className="text-lg font-bold text-gray-100 flex items-center gap-2">
+              <Upload size={20} className="text-primary" /> Import Puzzles
+            </h3>
+            <p className="text-sm text-gray-400">
+              Paste your Excel/TSV data here. Columns: <code>PuzzleId | FEN | Moves | Rating ...</code>
+            </p>
+            <textarea
+              value={importText}
+              onChange={(e) => setImportText(e.target.value)}
+              className="flex-1 bg-gray-900 border border-gray-700 p-3 rounded font-mono text-xs h-64 focus:ring-1 focus:ring-primary outline-none resize-none"
+              placeholder={`0000D\t5rk1/1p3ppp...\td3d6...\t1501...`}
+            />
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setShowImportModal(false)}>Cancel</Button>
+              <Button variant="primary" onClick={handleImport}>Import</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Main Content */}
       <main className="flex-1 flex flex-col md:flex-row overflow-hidden">
 
@@ -696,7 +998,10 @@ function App() {
               <div className="flex items-center justify-between bg-gray-800 p-2 rounded">
                 <span className="text-sm text-gray-300">Play vs AI</span>
                 <button
-                  onClick={() => setPlayMode(!playMode)}
+                  onClick={() => {
+                    setPlayMode(!playMode);
+                    if (appMode === 'puzzle') setAppMode('analysis');
+                  }}
                   className={clsx(
                     "w-10 h-5 rounded-full transition-colors relative",
                     playMode ? "bg-primary" : "bg-gray-600"
@@ -709,43 +1014,183 @@ function App() {
                 </button>
               </div>
 
-              <div className="h-px bg-gray-800 my-2" />
-
-              <div className="grid grid-cols-2 gap-y-1 gap-x-4 text-sm">
-                {history.map((move, i) => (
-                  <React.Fragment key={i}>
-                    {i % 2 === 0 && <div className="text-gray-500 text-right font-mono">{(i / 2 + 1)}.</div>}
-                    <button
-                      className={clsx(
-                        "text-left px-2 rounded hover:bg-gray-800 transition-colors font-medium flex justify-between items-center group",
-                        currentMoveIndex === i ? "bg-primary/20 text-primary" : "text-gray-300"
-                      )}
-                      onClick={() => jumpToMove(i)}
-                    >
-                      <span>{move.san}</span>
-                      {moveAnalyses[i]?.classification && (
-                        <span className={clsx(
-                          "text-[10px] px-1 rounded uppercase font-bold",
-                          moveAnalyses[i].classification === 'good' && "text-green-500",
-                          moveAnalyses[i].classification === 'inaccuracy' && "text-yellow-500",
-                          moveAnalyses[i].classification === 'mistake' && "text-orange-500",
-                          moveAnalyses[i].classification === 'blunder' && "text-red-500",
-                        )}>
-                          {moveAnalyses[i].classification === 'good' && '★'}
-                          {moveAnalyses[i].classification === 'inaccuracy' && '?!'}
-                          {moveAnalyses[i].classification === 'mistake' && '?'}
-                          {moveAnalyses[i].classification === 'blunder' && '??'}
-                        </span>
-                      )}
-                    </button>
-                  </React.Fragment>
-                ))}
+              <div className="flex gap-2">
+                <Button
+                  variant={appMode === 'puzzle' ? 'primary' : 'secondary'}
+                  className="flex-1 justify-center"
+                  onClick={() => {
+                    setAppMode('puzzle');
+                    setPlayMode(false);
+                    loadPuzzle(puzzleState.index);
+                  }}
+                >
+                  <CheckCircle size={16} /> Puzzles
+                </Button>
+                <Button
+                  variant={appMode === 'analysis' ? 'primary' : 'secondary'}
+                  className="flex-1 justify-center"
+                  onClick={() => setAppMode('analysis')}
+                >
+                  <Cpu size={16} /> Analysis
+                </Button>
               </div>
 
-              {/* Legend Removed as requested */}
+              {playMode && (
+                <div className="flex bg-gray-800 p-1 rounded gap-1">
+                  <button
+                    onClick={() => setUserColor('w')}
+                    className={clsx(
+                      "flex-1 text-xs py-1 rounded font-medium transition-colors border border-transparent",
+                      userColor === 'w' ? "bg-[#b58863] text-white shadow-sm" : "hover:bg-gray-700 text-gray-400"
+                    )}
+                  >
+                    Play as White
+                  </button>
+                  <button
+                    onClick={() => setUserColor('b')}
+                    className={clsx(
+                      "flex-1 text-xs py-1 rounded font-medium transition-colors border border-transparent",
+                      userColor === 'b' ? "bg-[#3C3B39] text-white shadow-sm" : "hover:bg-gray-700 text-gray-400"
+                    )}
+                  >
+                    Play as Black
+                  </button>
+                </div>
+              )}
+
+              <div className="h-px bg-gray-800 my-2" />
+
+              <div className="flex-1 overflow-auto bg-[#262421] scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
+                <div className="grid grid-cols-[3rem_1fr_1fr] auto-rows-max text-sm">
+                  {history.map((move, i) => (
+                    <React.Fragment key={i}>
+                      {i % 2 === 0 && (
+                        <div className="bg-[#262421] text-[#747474] font-medium flex items-center justify-center py-1">
+                          {Math.floor(i / 2) + 1}
+                        </div>
+                      )}
+
+                      <button
+                        ref={el => {
+                          // Scroll current move into view
+                          if (currentMoveIndex === i && el) {
+                            el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                          }
+                        }}
+                        className={clsx(
+                          "text-left px-2 py-1 font-medium flex items-center gap-2 hover:bg-[#363431] transition-colors relative",
+                          currentMoveIndex === i
+                            ? "bg-[#4887C8] text-white hover:bg-[#4887C8]"
+                            : (i % 2 === 0 ? "text-[#C3C3C3]" : "text-[#C3C3C3]"),
+                          // Alternate row background for the whole row? 
+                          // The image shows solid black background for the list, with rows not really distinctively striped, 
+                          // but the active move is blue. 
+                          // The provided image has row numbers with a darker background than the move cells potentially?
+                          // Let's stick to the dark theme.
+                        )}
+                        onClick={() => jumpToMove(i)}
+                      >
+                        <span className={clsx(
+                          // Adjust font size/weight
+                          // The image shows bold white-ish text for moves
+                        )}>{move.san}</span>
+
+                        {/* Evaluation/Classification Badge */}
+                        {moveAnalyses[i]?.classification && (
+                          <span className={clsx(
+                            "ml-auto text-[10px] px-1 rounded-sm font-bold uppercase",
+                            currentMoveIndex === i ? "text-white/90" : (
+                              moveAnalyses[i].classification === 'good' ? "text-[#95b545]" :
+                                moveAnalyses[i].classification === 'inaccuracy' ? "text-[#e8ae05]" :
+                                  moveAnalyses[i].classification === 'mistake' ? "text-[#f29f05]" :
+                                    moveAnalyses[i].classification === 'blunder' ? "text-[#ca3431]" : ""
+                            )
+                          )}>
+                            {moveAnalyses[i].classification === 'good' && ''} {/* Don't show star for good, maybe clutter */}
+                            {moveAnalyses[i].classification === 'inaccuracy' && '?!'}
+                            {moveAnalyses[i].classification === 'mistake' && '?'}
+                            {moveAnalyses[i].classification === 'blunder' && '??'}
+                          </span>
+                        )}
+                      </button>
+                    </React.Fragment>
+                  ))}
+
+                  {/* Filler if black hasn't moved yet in the last row */}
+                  {history.length % 2 !== 0 && (
+                    <div className="bg-[#262421]"></div>
+                  )}
+                </div>
+              </div>
+
+              {/* Game Result Footer */}
+              {(gameRef.current.isGameOver() || fen.includes(' w - - 0 1')) && ( // Just showing footer always for testing or only when over? Image shows 1-0.
+                // Let's rely on game over state
+                gameRef.current.isGameOver() && (
+                  <div className="border-t border-[#3C3B39] bg-[#21201D] p-3 flex flex-col items-center justify-center gap-1 shrink-0">
+                    <div className="text-[#C3C3C3] font-bold text-lg">
+                      {gameRef.current.isDraw() ? "½-½" : (gameRef.current.turn() === 'b' ? "1-0" : "0-1")}
+                    </div>
+                    <div className="text-[#747474] text-xs uppercase font-semibold">
+                      {gameRef.current.isCheckmate() ? "Checkmate" :
+                        gameRef.current.isDraw() ? "Draw" :
+                          gameRef.current.isStalemate() ? "Stalemate" : "Game Over"}
+                      {/* Note: Resignation is not tracked by chess.js internally unless we add it manually */}
+                    </div>
+                    <div className="text-[#747474] text-[10px] italic">
+                      {gameRef.current.isCheckmate() ? (gameRef.current.turn() === 'b' ? "White is victorious" : "Black is victorious") : ""}
+                    </div>
+                  </div>
+                )
+              )}
             </div>
           </Card>
 
+        </div>
+
+        {appMode === 'puzzle' ? (
+          <div className="p-4 border-t border-gray-800 space-y-4">
+            <h3 className="text-lg font-bold text-gray-200">Puzzle Mode</h3>
+
+            <div className="bg-gray-800 p-4 rounded text-center">
+              <div className="text-2xl font-bold text-primary">{puzzleState.userRating}</div>
+              <div className="text-xs text-gray-400 uppercase tracking-wider">Your Rating</div>
+            </div>
+
+            <div className={clsx(
+              "p-3 rounded border text-center font-medium",
+              puzzleState.status === 'solved' ? "bg-green-900/30 border-green-700 text-green-400" :
+                puzzleState.status === 'failed' ? "bg-red-900/30 border-red-700 text-red-400" :
+                  "bg-gray-800 border-gray-700 text-gray-300"
+            )}>
+              {puzzleState.message}
+            </div>
+
+            {puzzleState.status === 'solved' && (
+              <Button variant="primary" className="w-full justify-center" onClick={nextPuzzle}>
+                Next Puzzle <ChevronRight size={16} />
+              </Button>
+            )}
+            {puzzleState.status === 'failed' && (
+              <Button variant="secondary" className="w-full justify-center" onClick={() => {
+                // Retry logic: Reload current puzzle
+                loadPuzzle(puzzleState.index);
+              }}>
+                Retry <RotateCcw size={16} />
+              </Button>
+            )}
+
+            <div className="text-xs text-gray-500 text-center mt-4">
+              Puzzle {puzzleState.index + 1} / {puzzles.length}
+            </div>
+
+            <div className="border-t border-gray-700 pt-3">
+              <Button variant="ghost" size="sm" className="w-full text-xs text-gray-400" onClick={() => setShowImportModal(true)}>
+                <Upload size={14} /> Import Puzzles (Excel)
+              </Button>
+            </div>
+          </div>
+        ) : (
           <div className="p-4 border-t border-gray-800 space-y-2">
             <h3 className="text-xs font-semibold text-gray-500 uppercase">Load Game</h3>
 
@@ -792,42 +1237,53 @@ function App() {
               </Button>
             </div>
           </div>
-        </div>
+        )}
 
         {/* Center Panel: Board */}
         <div className="flex-1 bg-gray-950 flex flex-col items-center justify-center p-4 relative">
           <div className="w-full h-full flex flex-col items-center justify-center">
-            <div className="w-full max-w-[500px] aspect-square shadow-2xl shadow-black/50 rounded-lg border-4 border-gray-800 bg-[#b58863]">
+            <div
+              className="w-full max-w-[500px] aspect-square shadow-2xl shadow-black/50 rounded-lg border-4 border-gray-800 bg-[#b58863] relative"
+              onContextMenu={handleBoardContextMenu}
+              onMouseDown={handleBoardMouseDown}
+              onMouseUp={handleBoardMouseUp}
+            >
               {/* Use Custom Wrapper */}
               <ChessboardJS {...chessboardOptions} width={500} />
+              <ArrowOverlay
+                arrows={[...(engineArrow ? [engineArrow] : []), ...manualArrows]}
+                orientation={orientation}
+              />
             </div>
 
             {/* Evaluation Bar & Info */}
-            <div className="mt-6 w-full max-w-[500px] flex flex-col gap-2">
-              <div className="bg-gray-800 h-2 rounded-full overflow-hidden w-full">
-                <div
-                  className="bg-white h-full transition-all duration-500"
-                  style={{
-                    width: `${Math.min(Math.max(50 + (evaluation?.cp || 0) / 10, 5), 95)}%`
-                  }}
-                />
-              </div>
-              <div className="text-sm text-gray-300 font-mono space-y-1">
-                <div>
-                  <span className="font-bold text-gray-500">Evaluation:</span>{' '}
-                  {evaluation ? (evaluation.cp ? (evaluation.cp > 0 ? '+' : '') + (evaluation.cp / 100).toFixed(2) : `#${evaluation.mate}`) : '...'}
-                  <span className="mx-2 text-gray-600">|</span>
-                  <span className="font-bold text-gray-500">Depth:</span> 15
+            {appMode !== 'puzzle' && (
+              <div className="mt-6 w-full max-w-[500px] flex flex-col gap-2">
+                <div className="bg-gray-800 h-2 rounded-full overflow-hidden w-full">
+                  <div
+                    className="bg-white h-full transition-all duration-500"
+                    style={{
+                      width: `${Math.min(Math.max(50 + (evaluation?.cp || 0) / 10, 5), 95)}%`
+                    }}
+                  />
                 </div>
-                <div>
-                  <span className="font-bold text-gray-500">Best line:</span>{' '}
-                  <span className="text-primary italic">{bestLine.slice(0, 40)}{bestLine.length > 40 ? '...' : ''}</span>
+                <div className="text-sm text-gray-300 font-mono space-y-1">
+                  <div>
+                    <span className="font-bold text-gray-500">Evaluation:</span>{' '}
+                    {evaluation ? (evaluation.cp ? (evaluation.cp > 0 ? '+' : '') + (evaluation.cp / 100).toFixed(2) : `#${evaluation.mate}`) : '...'}
+                    <span className="mx-2 text-gray-600">|</span>
+                    <span className="font-bold text-gray-500">Depth:</span> 15
+                  </div>
+                  <div>
+                    <span className="font-bold text-gray-500">Best line:</span>{' '}
+                    <span className="text-primary italic">{bestLine.slice(0, 40)}{bestLine.length > 40 ? '...' : ''}</span>
+                  </div>
                 </div>
+                <p className="text-xs text-gray-600 mt-2">
+                  The green arrow shows Stockfish's suggested best move.
+                </p>
               </div>
-              <p className="text-xs text-gray-600 mt-2">
-                The green arrow shows Stockfish's suggested best move.
-              </p>
-            </div>
+            )}
 
             {/* Navigation Controls */}
             <div className="mt-4 flex gap-4">
