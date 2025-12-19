@@ -11,6 +11,8 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import clsx from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import puzzlesData from './data/puzzles.json';
+import { usePuzzles } from './hooks/usePuzzles';
+import PuzzleSelector from './components/PuzzleSelector';
 
 // --- Utility Components ---
 function Button({ children, onClick, variant = 'primary', className, disabled }) {
@@ -32,13 +34,16 @@ function Button({ children, onClick, variant = 'primary', className, disabled })
   );
 }
 
-function Card({ children, className, title, icon: Icon }) {
+function Card({ children, className, title, icon: Icon, action }) {
   return (
     <div className={twMerge("bg-gray-800 rounded-lg border border-gray-700 flex flex-col overflow-hidden", className)}>
       {(title || Icon) && (
-        <div className="px-4 py-3 border-b border-gray-700 bg-gray-800/50 flex items-center gap-2">
-          {Icon && <Icon size={18} className="text-primary" />}
-          <h3 className="font-semibold text-gray-200">{title}</h3>
+        <div className="px-4 py-3 border-b border-gray-700 bg-gray-800/50 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            {Icon && <Icon size={18} className="text-primary" />}
+            <h3 className="font-semibold text-gray-200">{title}</h3>
+          </div>
+          {action && <div>{action}</div>}
         </div>
       )}
       <div className="flex-1 overflow-auto p-4">
@@ -71,14 +76,35 @@ function App() {
   const [appMode, setAppMode] = useState('analysis'); // 'analysis' | 'puzzle'
   const [puzzles, setPuzzles] = useState(puzzlesData);
   const [showImportModal, setShowImportModal] = useState(false);
-  const [importText, setImportText] = useState('');
+  // Load Game Tray State
+  const [showLoadGameTray, setShowLoadGameTray] = useState(false);
+
+  // Firebase Puzzle Integration
+  const {
+    puzzles: firebasePuzzles,
+    loading: puzzlesLoading,
+    error: puzzlesError,
+    filterByRating,
+    filterByTheme,
+    getRandomPuzzle: getRandomFirebasePuzzle,
+    clearCache
+  } = usePuzzles();
+
+  // Sync Firebase puzzles to local state
+  useEffect(() => {
+    if (firebasePuzzles && firebasePuzzles.length > 0) {
+      setPuzzles(firebasePuzzles);
+      console.log(`✅ Loaded ${firebasePuzzles.length} puzzles from Firebase`);
+    }
+  }, [firebasePuzzles]);
 
   const [puzzleState, setPuzzleState] = useState({
     currentPuzzle: null,
     index: 0,
     status: 'idle', // 'idle' | 'solving' | 'solved' | 'failed'
     userRating: 1200,
-    message: ''
+    message: '',
+    showSolution: false
   });
 
   // Arrows State
@@ -473,6 +499,7 @@ function App() {
       if (games.length > 0) {
         loadPgn(games[0].pgn);
         setChatHistory(prev => [...prev, { role: 'model', text: `Loaded most recent game vs ${games[0].players.black.user ? games[0].players.black.user.name : 'AI'}!` }]);
+        setShowLoadGameTray(false); // Hide tray after loading
       }
     } catch (e) {
       alert("Error fetching Lichess games");
@@ -503,6 +530,7 @@ function App() {
       setFen(game.fen());
       setHistory(game.history({ verbose: true }));
       setCurrentMoveIndex(game.history().length - 1);
+      setShowLoadGameTray(false); // Hide tray after loading
     } catch (e) {
       alert("Invalid PGN");
     }
@@ -511,18 +539,39 @@ function App() {
   function loadFen(fen) {
     try {
       const game = gameRef.current;
-      // .load() usually returns true on success, but we can just call it 
-      // and catch any throw. If it returns false (v0.x), checks below might fail or be implicit.
-      game.load(fen);
+      // Sanitize input: 
+      // 1. Remove surrounding whitespace
+      // 2. Remove surrounding single or double quotes
+      // 3. Normalize spaces (replace multiple spaces with single space)
+      const sanitizedFen = fen.trim().replace(/^['"]|['"]$/g, '').trim().replace(/\s+/g, ' ');
+
+      console.log(`Attempting to load FEN: "${sanitizedFen}"`); // Debug log
+
+      // Attempt to load
+      try {
+        const result = game.load(sanitizedFen);
+        // Some chess.js versions return false on failure instead of throwing
+        if (result === false) {
+          throw new Error("Invalid FEN (game.load return false)");
+        }
+      } catch (loadError) {
+        console.error("Inner FEN load error:", loadError);
+        throw new Error("Invalid FEN string");
+      }
 
       setFen(game.fen());
       setHistory([]);
       setCurrentMoveIndex(-1);
       setEvaluation(null);
       setBestLine('');
+      setShowLoadGameTray(false); // Hide tray after loading
+
+      // Add a system message to chat
+      setChatHistory(prev => [...prev, { role: 'model', text: 'Loaded position from FEN.' }]);
+
     } catch (e) {
       console.error("FEN Load Error:", e);
-      alert("Invalid FEN string");
+      alert(`Invalid FEN string.\n\nDebug Info:\nInput: "${fen}"\nSanitized: "${fen.trim().replace(/^['"]|['"]$/g, '').trim().replace(/\s+/g, ' ')}"\nError: ${e.message}`);
     }
   }
 
@@ -564,7 +613,8 @@ function App() {
       index: index,
       status: 'solving',
       message: 'Find the best move!',
-      moveIndex: 0 // Track which move in the solution we are expected to play
+      moveIndex: 0, // Track which move in the solution we are expected to play
+      showSolution: false
     }));
   }
 
@@ -630,16 +680,25 @@ function App() {
       }
       return true;
     } else {
-      // WRONG MOVE
+      // WRONG MOVE - Allow retry
       setPuzzleState(prev => ({
         ...prev,
-        status: 'failed',
-        message: 'Wrong move! -10 Rating',
-        userRating: prev.userRating - 10
+        message: '❌ Wrong move! Try again.'
       }));
 
       return false; // Snapback
     }
+  }
+
+  function handleShowSolution() {
+    if (puzzleState.status !== 'solving' || puzzleState.showSolution) return;
+
+    setPuzzleState(prev => ({
+      ...prev,
+      showSolution: true,
+      userRating: prev.userRating - 5, // Penalty
+      message: 'Solution Revealed (-5 pts)'
+    }));
   }
 
   function handleImport() {
@@ -984,7 +1043,22 @@ function App() {
 
         {/* Left Panel: Controls & History */}
         <div className="w-full md:w-80 border-r border-gray-800 flex flex-col bg-gray-900/50">
-          <Card className="flex-1 border-0 rounded-none" title="Game History" icon={History}>
+          <Card
+            className="flex-1 border-0 rounded-none"
+            title="Game History"
+            icon={History}
+            action={
+              !playMode && appMode !== 'puzzle' && (
+                <Button
+                  variant="ghost"
+                  className="text-xs px-2 py-1 h-auto text-primary hover:text-white"
+                  onClick={() => setShowLoadGameTray(!showLoadGameTray)}
+                >
+                  {showLoadGameTray ? 'Hide' : 'Load Games'}
+                </Button>
+              )
+            }
+          >
             <div className="space-y-4">
               <div className="flex gap-2">
                 <Button variant="secondary" className="flex-1 text-sm" onClick={resetGame}>
@@ -1146,98 +1220,168 @@ function App() {
             </div>
           </Card>
 
-        </div>
 
-        {appMode === 'puzzle' ? (
-          <div className="p-4 border-t border-gray-800 space-y-4">
-            <h3 className="text-lg font-bold text-gray-200">Puzzle Mode</h3>
 
-            <div className="bg-gray-800 p-4 rounded text-center">
-              <div className="text-2xl font-bold text-primary">{puzzleState.userRating}</div>
-              <div className="text-xs text-gray-400 uppercase tracking-wider">Your Rating</div>
-            </div>
+          {appMode === 'puzzle' ? (
+            <div className="p-4 border-t border-gray-800 space-y-4">
+              <h3 className="text-lg font-bold text-gray-200">Puzzle Mode</h3>
 
-            <div className={clsx(
-              "p-3 rounded border text-center font-medium",
-              puzzleState.status === 'solved' ? "bg-green-900/30 border-green-700 text-green-400" :
-                puzzleState.status === 'failed' ? "bg-red-900/30 border-red-700 text-red-400" :
-                  "bg-gray-800 border-gray-700 text-gray-300"
-            )}>
-              {puzzleState.message}
-            </div>
+              {/* Firebase Status Indicators */}
+              {puzzlesLoading && (
+                <div className="bg-blue-900/30 border border-blue-700 text-blue-400 px-3 py-2 rounded text-xs flex items-center gap-2">
+                  <Cpu size={14} className="animate-spin" />
+                  Loading puzzles from Firebase...
+                </div>
+              )}
 
-            {puzzleState.status === 'solved' && (
-              <Button variant="primary" className="w-full justify-center" onClick={nextPuzzle}>
-                Next Puzzle <ChevronRight size={16} />
-              </Button>
-            )}
-            {puzzleState.status === 'failed' && (
-              <Button variant="secondary" className="w-full justify-center" onClick={() => {
-                // Retry logic: Reload current puzzle
-                loadPuzzle(puzzleState.index);
-              }}>
-                Retry <RotateCcw size={16} />
-              </Button>
-            )}
+              {puzzlesError && (
+                <div className="bg-yellow-900/30 border border-yellow-700 text-yellow-400 px-3 py-2 rounded text-xs">
+                  ⚠️ Using local puzzles ({puzzlesError})
+                </div>
+              )}
 
-            <div className="text-xs text-gray-500 text-center mt-4">
-              Puzzle {puzzleState.index + 1} / {puzzles.length}
-            </div>
+              {!puzzlesLoading && !puzzlesError && firebasePuzzles.length > 0 && (
+                <div className="bg-green-900/30 border border-green-700 text-green-400 px-3 py-2 rounded text-xs">
+                  ✅ {firebasePuzzles.length} puzzles loaded from Firebase
+                </div>
+              )}
 
-            <div className="border-t border-gray-700 pt-3">
-              <Button variant="ghost" size="sm" className="w-full text-xs text-gray-400" onClick={() => setShowImportModal(true)}>
-                <Upload size={14} /> Import Puzzles (Excel)
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="p-4 border-t border-gray-800 space-y-2">
-            <h3 className="text-xs font-semibold text-gray-500 uppercase">Load Game</h3>
+              {/* Puzzle Selector */}
+              <PuzzleSelector
+                puzzles={puzzles}
+                loading={puzzlesLoading}
+                onPuzzleSelect={(puzzle) => {
+                  // Find puzzle index and load it
+                  const index = puzzles.findIndex(
+                    p => (p.PuzzleId === puzzle.PuzzleId || p.PuzzleId === puzzle.id || p.id === puzzle.id)
+                  );
+                  if (index !== -1) {
+                    loadPuzzle(index);
+                  }
+                }}
+                onFilterChange={({ minRating, maxRating, theme }) => {
+                  if (theme) {
+                    filterByTheme(theme).then(filtered => {
+                      if (filtered && filtered.length > 0) {
+                        setPuzzles(filtered);
+                      }
+                    });
+                  } else {
+                    filterByRating(minRating, maxRating).then(filtered => {
+                      if (filtered && filtered.length > 0) {
+                        setPuzzles(filtered);
+                      }
+                    });
+                  }
+                }}
+              />
 
-            {/* PGN Load */}
-            <div className="space-y-2">
-              <div className="flex gap-2">
-                <input
-                  id="lichess-username"
-                  className="flex-1 bg-gray-800 border-none rounded px-3 py-2 text-sm focus:ring-1 focus:ring-primary"
-                  placeholder="Lichess Username"
-                  onKeyDown={(e) => e.key === 'Enter' && fetchLichessGames(e.target.value)}
-                />
-                <Button variant="secondary" className="px-3" onClick={() => fetchLichessGames(document.getElementById('lichess-username').value)}>
-                  <Upload size={16} />
-                </Button>
-                <button onClick={generateRandomFen} className="bg-gray-700 hover:bg-gray-600 text-gray-200 p-2 rounded" title="Random FEN">
-                  <RotateCcw size={16} />
-                </button>
+              <div className="bg-gray-800 p-4 rounded text-center">
+                <div className="text-2xl font-bold text-primary">{puzzleState.userRating}</div>
+                <div className="text-xs text-gray-400 uppercase tracking-wider">Your Rating</div>
               </div>
 
-              <textarea
-                className="w-full bg-gray-800 border-none rounded p-3 text-xs font-mono h-24 resize-none focus:ring-1 focus:ring-primary"
-                placeholder="Paste PGN here..."
-                value={pgnInput}
-                onChange={(e) => setPgnInput(e.target.value)}
-              />
-              <Button size="sm" variant="secondary" className="w-full justify-center" onClick={() => loadPgn(pgnInput)}>
-                <Play size={16} /> Load PGN
-              </Button>
-            </div>
+              <div className={clsx(
+                "p-3 rounded border text-center font-medium",
+                puzzleState.status === 'solved' ? "bg-green-900/30 border-green-700 text-green-400" :
+                  puzzleState.status === 'failed' ? "bg-red-900/30 border-red-700 text-red-400" :
+                    "bg-gray-800 border-gray-700 text-gray-300"
+              )}>
+                {puzzleState.message}
+              </div>
 
-            <div className="h-px bg-gray-800 my-2" />
+              {puzzleState.status === 'solving' && !puzzleState.showSolution && (
+                <Button
+                  variant="secondary"
+                  className="w-full justify-center border border-yellow-700/50 text-yellow-500 hover:bg-yellow-900/20"
+                  onClick={handleShowSolution}
+                >
+                  <HelpCircle size={16} /> Show Solution (-5 pts)
+                </Button>
+              )}
 
-            {/* FEN Load */}
-            <div className="space-y-2">
-              <input
-                className="w-full bg-gray-800 border-none rounded px-3 py-2 text-xs font-mono focus:ring-1 focus:ring-primary"
-                placeholder="Paste FEN position..."
-                value={fenInput}
-                onChange={(e) => setFenInput(e.target.value)}
-              />
-              <Button size="sm" variant="secondary" className="w-full justify-center" onClick={() => loadFen(fenInput)}>
-                <CheckCircle size={16} /> Load FEN
-              </Button>
+              {puzzleState.showSolution && (
+                <div className="bg-gray-800 p-3 rounded text-xs font-mono text-gray-400 break-words border border-gray-700">
+                  <div className="font-bold text-gray-300 mb-1">Solution:</div>
+                  {puzzleState.currentPuzzle?.Moves}
+                </div>
+              )}
+
+              {puzzleState.status === 'solved' && (
+                <Button variant="primary" className="w-full justify-center" onClick={nextPuzzle}>
+                  Next Puzzle <ChevronRight size={16} />
+                </Button>
+              )}
+
+              <div className="text-xs text-gray-500 text-center mt-4">
+                Puzzle {puzzleState.index + 1} / {puzzles.length}
+              </div>
+
+              <div className="border-t border-gray-700 pt-3">
+                <Button variant="ghost" size="sm" className="w-full text-xs text-gray-400" onClick={() => setShowImportModal(true)}>
+                  <Upload size={14} /> Import Puzzles (Excel)
+                </Button>
+              </div>
             </div>
-          </div>
-        )}
+          ) : (
+            <>
+              {showLoadGameTray && (
+                <div className="p-4 border-t border-gray-800 space-y-2">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-xs font-semibold text-gray-500 uppercase">Load Game</h3>
+                    <Button variant="ghost" className="p-1 h-auto" onClick={() => setShowLoadGameTray(false)}>
+                      <X size={14} />
+                    </Button>
+                  </div>
+
+
+                  {/* PGN Load */}
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        id="lichess-username"
+                        className="flex-1 bg-gray-800 border-none rounded px-3 py-2 text-sm focus:ring-1 focus:ring-primary"
+                        placeholder="Lichess Username"
+                        onKeyDown={(e) => e.key === 'Enter' && fetchLichessGames(e.target.value)}
+                      />
+                      <Button variant="secondary" className="px-3" onClick={() => fetchLichessGames(document.getElementById('lichess-username').value)}>
+                        <Upload size={16} />
+                      </Button>
+                      <button onClick={generateRandomFen} className="bg-gray-700 hover:bg-gray-600 text-gray-200 p-2 rounded" title="Random FEN">
+                        <RotateCcw size={16} />
+                      </button>
+                    </div>
+
+                    <textarea
+                      className="w-full bg-gray-800 border-none rounded p-3 text-xs font-mono h-24 resize-none focus:ring-1 focus:ring-primary"
+                      placeholder="Paste PGN here..."
+                      value={pgnInput}
+                      onChange={(e) => setPgnInput(e.target.value)}
+                    />
+                    <Button size="sm" variant="secondary" className="w-full justify-center" onClick={() => loadPgn(pgnInput)}>
+                      <Play size={16} /> Load PGN
+                    </Button>
+                  </div>
+
+                  <div className="h-px bg-gray-800 my-2" />
+
+                  {/* FEN Load */}
+                  <div className="space-y-2">
+                    <input
+                      className="w-full bg-gray-800 border-none rounded px-3 py-2 text-xs font-mono focus:ring-1 focus:ring-primary"
+                      placeholder="Paste FEN position..."
+                      value={fenInput}
+                      onChange={(e) => setFenInput(e.target.value)}
+                    />
+                    <Button size="sm" variant="secondary" className="w-full justify-center" onClick={() => loadFen(fenInput)}>
+                      <CheckCircle size={16} /> Load FEN
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
         {/* Center Panel: Board */}
         <div className="flex-1 bg-gray-950 flex flex-col items-center justify-center p-4 relative">
@@ -1251,13 +1395,16 @@ function App() {
               {/* Use Custom Wrapper */}
               <ChessboardJS {...chessboardOptions} width={500} />
               <ArrowOverlay
-                arrows={[...(engineArrow ? [engineArrow] : []), ...manualArrows]}
+                arrows={[
+                  ...(appMode !== 'puzzle' && !playMode && engineArrow ? [engineArrow] : []),
+                  ...manualArrows
+                ]}
                 orientation={orientation}
               />
             </div>
 
             {/* Evaluation Bar & Info */}
-            {appMode !== 'puzzle' && (
+            {appMode !== 'puzzle' && !playMode && (
               <div className="mt-6 w-full max-w-[500px] flex flex-col gap-2">
                 <div className="bg-gray-800 h-2 rounded-full overflow-hidden w-full">
                   <div
