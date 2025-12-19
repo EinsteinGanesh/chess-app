@@ -5,7 +5,7 @@ import ChessboardJS from './components/ChessboardJS'; // Import the new wrapper
 import ArrowOverlay from './components/ArrowOverlay';
 import {
   History, Upload, Play, RotateCcw, ChevronLeft, ChevronRight,
-  MessageSquare, Cpu, Settings, X, Send, AlertTriangle, CheckCircle, HelpCircle
+  MessageSquare, Cpu, Settings, X, Send, AlertTriangle, CheckCircle, HelpCircle, Star
 } from 'lucide-react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import clsx from 'clsx';
@@ -59,6 +59,9 @@ function App() {
   const gameRef = useRef(new Chess());
   const [fen, setFen] = useState(gameRef.current.fen());
   const [history, setHistory] = useState([]);
+  const historyRef = useRef(history);
+  useEffect(() => { historyRef.current = history; }, [history]);
+
   const [currentMoveIndex, setCurrentMoveIndex] = useState(-1); // -1 = start
   const [orientation, setOrientation] = useState('white');
 
@@ -71,6 +74,7 @@ function App() {
   const [moveAnalyses, setMoveAnalyses] = useState({}); // { index: { pre: {cp, mate}, post: {cp, mate}, classification: '...' } }
   const [analysisQueue, setAnalysisQueue] = useState([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [showAnalysisSummary, setShowAnalysisSummary] = useState(false);
 
   // Puzzle State
   const [appMode, setAppMode] = useState('analysis'); // 'analysis' | 'puzzle'
@@ -187,75 +191,6 @@ function App() {
   // --- Engine Initialization ---
   useEffect(() => {
     const worker = new Worker('/stockfish.js');
-    worker.onmessage = (e) => {
-      const msg = e.data;
-      if (msg === 'uciok') {
-        setIsEngineReady(true);
-      }
-      if (msg.startsWith('info depth')) {
-        // Parse evaluation
-        // Example: info depth 10 ... score cp 50 ... pv e2e4 e7e5
-        const cpMatch = msg.match(/score cp (-?\d+)/);
-        const mateMatch = msg.match(/score mate (-?\d+)/);
-        const pvMatch = msg.match(/ pv (.+)/);
-
-        if (cpMatch || mateMatch) {
-          const newEval = {
-            cp: cpMatch ? parseInt(cpMatch[1]) : null,
-            mate: mateMatch ? parseInt(mateMatch[1]) : null,
-          };
-          setEvaluation(newEval);
-
-          // Update analysis for current move if we are at the latest position or reviewing
-          setCurrentMoveIndex(idx => {
-            if (idx >= 0) {
-              setMoveAnalyses(prev => {
-                const currentAnalysis = prev[idx] || {};
-                // If we already have a classification that is "final" maybe don't overwrite? 
-                // But engine refines depth, so overwriting is good for accuracy.
-
-                // Calculate Loss / Classification
-                // Loss = PreCP + PostCP (since perspectives flip)
-                let classification = null;
-                let loss = null;
-
-                if (currentAnalysis.pre && newEval) {
-                  // Handle Checks/Mates complexities - simplified for CP
-                  if (currentAnalysis.pre.cp !== null && newEval.cp !== null) {
-                    loss = currentAnalysis.pre.cp + newEval.cp; // Sum because perspectives are opposite
-
-                    // Classification logic
-                    // Note: "Good" for user means LOSS is LOW.
-                    // If loss is negative (we improved??), it's a blunder by opponent that we capitalized on? 
-                    // Or engine changed its mind.
-                    // Generally Loss > 0 means we lost advantage.
-
-                    if (loss <= 50) classification = 'good';
-                    else if (loss <= 150) classification = 'inaccuracy';
-                    else if (loss <= 300) classification = 'mistake';
-                    else classification = 'blunder';
-                  }
-                }
-
-                return {
-                  ...prev,
-                  [idx]: {
-                    ...currentAnalysis,
-                    post: newEval,
-                    loss,
-                    classification
-                  }
-                };
-              });
-            }
-            return idx;
-          });
-        }
-        if (pvMatch) {
-          setBestLine(pvMatch[1]);
-        }
-      }
-    };
     worker.postMessage('uci');
     worker.postMessage('setoption name Hash value 64');
     setEngine(worker);
@@ -270,8 +205,9 @@ function App() {
   const [optionSquares, setOptionSquares] = useState({});
 
   // --- Engine Analysis Trigger ---
+  // --- Engine Analysis Trigger ---
   useEffect(() => {
-    if (!engine || !isEngineReady) return;
+    if (!engine || !isEngineReady || isAnalyzing) return;
 
     setAnalyzing(true);
     engine.postMessage('stop');
@@ -281,7 +217,7 @@ function App() {
     return () => {
       // Cleanup if needed
     };
-  }, [engine, isEngineReady, fen]);
+  }, [engine, isEngineReady, fen, isAnalyzing]);
 
   // Debug: Log FEN changes
   useEffect(() => {
@@ -765,29 +701,66 @@ function App() {
 
   // Helper to process eval results
   const handleAnalysisResult = (fenIndex, newEval) => {
+    // console.log(`Analysis Result: Index ${fenIndex}`, newEval);
     setMoveAnalyses(prev => {
       const next = { ...prev };
 
-      if (fenIndex < history.length) {
+      // Helper to get numeric score (handling mate)
+      const getScore = (e) => {
+        if (e.mate !== null) {
+          // If mate > 0 (we win), score is very high. If < 0 (we lose), very low.
+          // Prefer smaller mate distance (higher score if positive, lower if negative)
+          return e.mate > 0 ? (20000 - e.mate) : (-20000 - e.mate);
+        }
+        return e.cp;
+      };
+
+      if (fenIndex < historyRef.current.length) {
         const moveIdx = fenIndex;
+        // console.log(`Updating PRE for move ${moveIdx}`);
         next[moveIdx] = { ...next[moveIdx], pre: newEval };
       }
 
       if (fenIndex > 0) {
         const moveIdx = fenIndex - 1;
+        // console.log(`Updating POST for move ${moveIdx}`);
         next[moveIdx] = { ...next[moveIdx], post: newEval };
 
         const analysis = next[moveIdx];
-        if (analysis.pre && analysis.post && analysis.pre.cp !== null && analysis.post.cp !== null) {
-          const loss = analysis.pre.cp + analysis.post.cp;
+        if (analysis.pre && analysis.post) {
+          const preScore = getScore(analysis.pre);
+          const postScore = getScore(analysis.post);
 
-          let classification = 'good';
-          if (loss > 300) classification = 'blunder';
-          else if (loss > 100) classification = 'mistake';
-          else if (loss > 50) classification = 'inaccuracy';
+          if (preScore !== null && postScore !== null) {
+            // Loss calculation: sum because post is from opponent perspective (sign flipped)
+            // e.g. Pre +100 (White). Post +100 (Black). Sum 200? No.
+            // Post +100 means Black is +1. So White is -1.
+            // Pre=100 (W+1). Post=100 (B+1 => W-1).
+            // Loss = 100 - (-100) = 200.
+            // Wait, CP is always relative to side to move.
+            // If White +1. CP=100.
+            // Opponent move. Now Black to move.
+            // If Black is +1. CP=100.
+            // This means White is -1.
+            // So deviation is from +1 to -1. Loss = 200.
+            // Mathematical check:
+            // Loss = Pre - (-Post)? No.
+            // Loss = Pre + Post. 
+            // 100 + 100 = 200. Correct.
 
-          next[moveIdx].classification = classification;
-          next[moveIdx].loss = loss;
+            const loss = preScore + postScore;
+            // console.log(`Move ${moveIdx} Loss: ${loss} (Pre: ${preScore}, Post: ${postScore})`);
+
+            let classification = 'good';
+            if (loss > 300) classification = 'blunder';
+            else if (loss > 100) classification = 'mistake';
+            else if (loss > 50) classification = 'inaccuracy';
+            // Also consider winning a forced mate missed?
+            // If preScore > 10000 (Mate) and postScore < 10000 (Lost mate)
+
+            next[moveIdx].classification = classification;
+            next[moveIdx].loss = loss;
+          }
         }
       }
       return next;
@@ -796,13 +769,51 @@ function App() {
 
   const startBatchAnalysis = () => {
     setMoveAnalyses({});
+    setShowAnalysisSummary(false);
     const fens = [];
     const game = new Chess();
     fens.push({ index: 0, fen: game.fen() });
 
     for (let i = 0; i < history.length; i++) {
       game.move(history[i]);
-      fens.push({ index: i + 1, fen: game.fen() });
+
+      if (game.isGameOver()) {
+        let score = { cp: 0, mate: null };
+        if (game.isCheckmate()) {
+          const isWhiteMated = game.turn() === 'w';
+          // If White mated, score is -Win. If Black mated, score is +Win.
+          // Using a tiny non-zero mate to preserve sign if needed, or just 0 logic?
+          // getScore logic: e.mate > 0 ? (20000 - e.mate) : (-20000 - e.mate)
+          // If mate is 0: 20000 - 0 = 20000. -20000 - 0 = -20000.
+          // We need to pass signed mate. 
+          // -0 is 0 in JS. 
+          // Let's pass +1 or -1 for simplicity to represent "Mate in 0"? 
+          // Actually, if we pass mate: 1 (Mate in 1 for White) -> 19999.
+          // Mate in 0 for White (White Won): 20000? 
+          // Mate 0 usually implies "Just delivered mate".
+          // If turn is 'w', White IS mated. White lost. Score should be -20000.
+          // So mate should be negative.
+          score = { cp: null, mate: isWhiteMated ? -0.1 : 0.1 }; // hacky float to preserve sign? 
+          // getScore uses `e.mate > 0`. 
+          // 0.1 > 0 is true. -0.1 > 0 is false.
+          // parseInt(mate) might kill the float.
+          // Let's rely on standard: if White mated, evaluate as Black winning (negative mate for white?).
+          // Wait. Mate +N means White wins in N. Mate -N means Black wins in N.
+          // If White is mated, White lost. Score is -M0.
+          // So mate param should be negative.
+          // Let's just manually set the result via handleAnalysisResult?
+          // But handleAnalysisResult expects an eval object.
+          // I'll assume 'mate: isWhiteMated ? -1 : 1' roughly correct (Mate just happened).
+          score = { cp: null, mate: isWhiteMated ? -1 : 1 }; // Mate in 1 (just happened)
+        }
+        // If Draw, cp 0 is default.
+
+        // We need to apply this result to the PREVIOUS move's post-eval.
+        // handleAnalysisResult(i + 1, score) does exactly that (updates move i).
+        handleAnalysisResult(i + 1, score);
+      } else {
+        fens.push({ index: i + 1, fen: game.fen() });
+      }
     }
 
     setAnalysisQueue(fens);
@@ -827,63 +838,99 @@ function App() {
     }
   }, [playMode, fen, aiColor, engine]); // Removed 'game' dependency
 
-  // Worker listener for moves
+  // --- Engine Message Handling (Unified) ---
   useEffect(() => {
     if (!engine) return;
 
-    const originalOnMessage = engine.onmessage;
-    engine.onmessage = (e) => {
+    const handleEngineMessage = (e) => {
       const msg = e.data;
+
+      if (msg === 'uciok') {
+        setIsEngineReady(true);
+      }
+
       if (msg.startsWith('info depth')) {
-        const depth = parseInt(msg.split('depth ')[1].split(' ')[0]);
-        let score = 0;
-        let mate = null;
-        if (msg.includes('mate')) {
-          mate = parseInt(msg.split('mate ')[1].split(' ')[0]);
-        } else if (msg.includes('cp')) {
-          score = parseInt(msg.split('cp ')[1].split(' ')[0]);
+        const cpMatch = msg.match(/score cp (-?\d+)/);
+        const mateMatch = msg.match(/score mate (-?\d+)/);
+        const pvMatch = msg.match(/ pv (.+)/);
+
+        if (cpMatch || mateMatch) {
+          const score = cpMatch ? parseInt(cpMatch[1]) : 0;
+          const mate = mateMatch ? parseInt(mateMatch[1]) : null;
+          const newEval = { cp: score, mate };
+
+          setEvaluation(newEval);
+
+          if (analyzingIndexRef.current !== null) {
+            handleAnalysisResult(analyzingIndexRef.current, newEval);
+          } else {
+            setCurrentMoveIndex(idx => {
+              if (idx >= 0) {
+                setMoveAnalyses(prev => {
+                  const currentAnalysis = prev[idx] || {};
+                  return {
+                    ...prev,
+                    [idx]: { ...currentAnalysis, post: newEval }
+                  };
+                });
+              }
+              return idx;
+            });
+          }
         }
 
-        const newEval = { cp: score, mate };
-        setEvaluation(newEval); // Update UI bar always
-
-        // Update Analysis Data
-        // If we are batch analyzing, we need to know WHICH position this is.
-        // We can track 'analyzingIndex' in state or ref.
-        if (analyzingIndexRef.current !== null) {
-          handleAnalysisResult(analyzingIndexRef.current, newEval);
-        } else {
-          // Live analysis (currentMoveIndex)
-          // Existing logic...
-          // Actually, let's unify.
-          // If analyzingIndexRef is set, usage it. Else usage currentMoveIndex?
-          // "Live" analysis happens on 'makeMove'.
-          // The existing 'makeMove' logic stored 'pre' evaluation. 
-          // It relies on 'evaluation' state being fresh.
-
-          // To support batch, we need to explicitly link the eval to the index.
+        if (pvMatch) {
+          setBestLine(pvMatch[1]);
         }
       }
 
       if (msg.startsWith('bestmove')) {
-        const move = msg.split(' ')[1];
-        if (playMode && gameRef.current.turn() === aiColor && !isAnalyzing) {
-          makeMove({ from: move.substring(0, 2), to: move.substring(2, 4), promotion: 'q' });
-        }
+        const moveStr = msg.split(' ')[1];
+        if (analyzingIndexRef.current !== null) {
+          // Capture best move logic
+          const idx = analyzingIndexRef.current;
+          if (moveStr) {
+            try {
+              const tmp = new Chess();
+              // Replay history to get to the position being analyzed
+              // Note: idx corresponds to the move index in history. 
+              // idx=0 is start pos (pre-move 0). 
+              for (let i = 0; i < idx; i++) {
+                // Ensure we don't go out of bounds if history changed (unlikely during analysis lock)
+                if (historyRef.current[i]) tmp.move(historyRef.current[i]);
+              }
+              const moveObj = tmp.move({
+                from: moveStr.substring(0, 2),
+                to: moveStr.substring(2, 4),
+                promotion: 'q'
+              });
+              if (moveObj) {
+                setMoveAnalyses(prev => ({
+                  ...prev,
+                  [idx]: { ...prev[idx], bestMove: moveObj.san }
+                }));
+              }
+            } catch (err) {
+              console.error("Error calculating best move SAN:", err);
+            }
+          }
 
-        // Trigger next if batch
-        if (isAnalyzing && analyzingIndexRef.current !== null) {
-          const finishedIndex = analyzingIndexRef.current;
-          analyzingIndexRef.current = null; // Clear
-          setAnalysisQueue(q => q.slice(1)); // Remove task, triggering effect
+          analyzingIndexRef.current = null;
+          setAnalysisQueue(queue => queue.slice(1));
+        } else if (playMode && gameRef.current.turn() === aiColor && !isAnalyzing) {
+          if (moveStr && moveStr.length >= 4) {
+            makeMove({
+              from: moveStr.substring(0, 2),
+              to: moveStr.substring(2, 4),
+              promotion: 'q'
+            });
+          }
         }
       }
-      if (originalOnMessage) originalOnMessage(e);
     };
 
-    return () => {
-      engine.onmessage = originalOnMessage;
-    };
+    engine.onmessage = handleEngineMessage;
+    return () => { engine.onmessage = null; };
   }, [engine, playMode, aiColor]);
 
 
@@ -892,7 +939,10 @@ function App() {
   useEffect(() => {
     if (!isAnalyzing) return;
     if (analysisQueue.length === 0) {
-      setIsAnalyzing(false);
+      if (isAnalyzing) {
+        setIsAnalyzing(false);
+        setShowAnalysisSummary(true);
+      }
       analyzingIndexRef.current = null;
       return;
     }
@@ -1010,7 +1060,81 @@ function App() {
             className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm mb-3 focus:outline-none focus:border-primary"
             placeholder="Enter key..."
           />
-          <Button size="sm" onClick={() => setShowApiKeyInput(false)}>Done</Button>
+        </div>
+      )}
+
+      {/* Analysis Summary Modal */}
+      {showAnalysisSummary && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-gray-800 rounded-lg shadow-2xl border border-gray-700 w-[600px] flex flex-col max-h-[80vh]">
+            <div className="p-4 border-b border-gray-700 flex justify-between items-center">
+              <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                <Cpu className="text-primary" /> Analysis Complete
+              </h3>
+              <button onClick={() => setShowAnalysisSummary(false)} className="text-gray-400 hover:text-white">
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto">
+              <div className="grid grid-cols-3 gap-4 mb-6">
+                {[
+                  { label: 'Good Moves', count: Object.values(moveAnalyses).filter(a => a.classification === 'good').length, color: 'text-green-400', icon: CheckCircle },
+                  { label: 'Mistakes', count: Object.values(moveAnalyses).filter(a => a.classification === 'mistake').length, color: 'text-orange-400', icon: HelpCircle },
+                  { label: 'Blunders', count: Object.values(moveAnalyses).filter(a => a.classification === 'blunder').length, color: 'text-red-500', icon: AlertTriangle },
+                ].map((stat, i) => (
+                  <div key={i} className="bg-gray-700/50 p-4 rounded-lg flex flex-col items-center border border-gray-700">
+                    <stat.icon size={24} className={`mb-2 ${stat.color}`} />
+                    <span className="text-3xl font-bold text-white">{stat.count}</span>
+                    <span className="text-xs text-gray-400 uppercase tracking-wider">{stat.label}</span>
+                  </div>
+                ))}
+              </div>
+
+              <h4 className="font-bold text-gray-300 mb-3">Key Moments</h4>
+              <div className="space-y-3">
+                {Object.entries(moveAnalyses)
+                  .filter(([_, a]) => a.classification === 'mistake' || a.classification === 'blunder')
+                  .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+                  .map(([idx, analysis]) => {
+                    const moveNum = Math.floor(parseInt(idx) / 2) + 1;
+                    const isWhite = parseInt(idx) % 2 === 0;
+                    // Need to get the actual move SAN from history
+                    const moveSan = history[parseInt(idx)]?.san || '???';
+
+                    return (
+                      <div key={idx} className="bg-gray-900/50 p-3 rounded border border-gray-700 flex items-start gap-3 hover:bg-gray-900 transition-colors cursor-pointer" onClick={() => {
+                        jumpToMove(parseInt(idx));
+                        setShowAnalysisSummary(false);
+                      }}>
+                        <div className="mt-1">
+                          {analysis.classification === 'blunder'
+                            ? <AlertTriangle className="text-red-500" size={16} />
+                            : <HelpCircle className="text-orange-400" size={16} />}
+                        </div>
+                        <div>
+                          <div className="text-sm font-semibold text-gray-200">
+                            Move {moveNum}{isWhite ? '.' : '...'} {moveSan} <span className={analysis.classification === 'blunder' ? "text-red-500" : "text-orange-400"}>
+                              {analysis.classification === 'blunder' ? 'Blunder' : 'Mistake'}
+                            </span>
+                          </div>
+                          {analysis.bestMove && (
+                            <div className="text-xs text-gray-400 mt-1">
+                              Best was <span className="text-primary font-bold">{analysis.bestMove}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                {Object.values(moveAnalyses).filter(a => a.classification === 'mistake' || a.classification === 'blunder').length === 0 && (
+                  <div className="text-center text-gray-500 italic py-4">No significant errors found. Great game!</div>
+                )}
+              </div>
+            </div>
+            <div className="p-4 border-t border-gray-700 bg-gray-800/50 flex justify-end">
+              <Button onClick={() => setShowAnalysisSummary(false)}>Close</Button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1135,65 +1259,83 @@ function App() {
               <div className="h-px bg-gray-800 my-2" />
 
               <div className="flex-1 overflow-auto bg-[#262421] scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
-                <div className="grid grid-cols-[3rem_1fr_1fr] auto-rows-max text-sm">
-                  {history.map((move, i) => (
-                    <React.Fragment key={i}>
-                      {i % 2 === 0 && (
-                        <div className="bg-[#262421] text-[#747474] font-medium flex items-center justify-center py-1">
-                          {Math.floor(i / 2) + 1}
+                <div className="table w-full text-sm border-collapse">
+                  <div className="table-row text-[#747474] text-xs font-semibold border-b border-[#3C3B39]">
+                    <div className="table-cell p-2 w-8 text-center">#</div>
+                    <div className="table-cell p-2 w-1/2">White</div>
+                    <div className="table-cell p-2 w-1/2">Black</div>
+                  </div>
+                  {Array.from({ length: Math.ceil(history.length / 2) }).map((_, rowIdx) => {
+                    const whiteMoveIdx = rowIdx * 2;
+                    const blackMoveIdx = rowIdx * 2 + 1;
+                    const whiteMove = history[whiteMoveIdx];
+                    const blackMove = history[blackMoveIdx];
+                    const whiteAnalysis = moveAnalyses[whiteMoveIdx];
+                    const blackAnalysis = moveAnalyses[blackMoveIdx];
+
+                    const renderMoveCell = (move, idx, analysis) => {
+                      if (!move) return <div className="table-cell p-2"></div>;
+                      const isSelected = currentMoveIndex === idx;
+                      return (
+                        <div
+                          key={idx}
+                          className={clsx(
+                            "table-cell p-2 align-top border-b border-[#3C3B39] transition-colors cursor-pointer relative group",
+                            isSelected ? "bg-[#363431]" : "hover:bg-[#2A2926]"
+                          )}
+                          onClick={() => jumpToMove(idx)}
+                        >
+                          <div className="flex flex-col">
+                            <div className="flex items-center gap-2">
+                              <span className={clsx("font-bold text-base", isSelected ? "text-white" : "text-[#C3C3C3]")}>
+                                {move.san}
+                              </span>
+                              {analysis?.classification && (
+                                <span className={clsx(
+                                  "text-xs font-bold px-1 rounded",
+                                  analysis.classification === 'brilliant' ? "text-cyan-400" :
+                                    analysis.classification === 'good' ? "text-[#95b545]" :
+                                      analysis.classification === 'inaccuracy' ? "text-[#e8ae05]" :
+                                        analysis.classification === 'mistake' ? "text-[#f29f05]" :
+                                          analysis.classification === 'blunder' ? "text-[#ca3431]" : ""
+                                )}>
+                                  {analysis.classification === 'good' && <CheckCircle size={12} />}
+                                  {analysis.classification === 'inaccuracy' && '?!'}
+                                  {analysis.classification === 'mistake' && '?'}
+                                  {analysis.classification === 'blunder' && '??'}
+                                </span>
+                              )}
+                            </div>
+                            {/* Sub-info: Eval and Best Move */}
+                            {(analysis?.post || analysis?.bestMove) && (
+                              <div className="text-[10px] text-[#747474] font-medium mt-0.5 min-h-[1.2em]">
+                                {analysis.post && (
+                                  <span className="mr-2">
+                                    {analysis.post.mate ? `M${analysis.post.mate}` : (analysis.post.cp / 100).toFixed(2)}
+                                  </span>
+                                )}
+                                {analysis.bestMove && (['mistake', 'blunder'].includes(analysis.classification)) && (
+                                  <span className="text-primary opacity-80">
+                                    Best: {analysis.bestMove}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      )}
+                      );
+                    };
 
-                      <button
-                        ref={el => {
-                          // Scroll current move into view
-                          if (currentMoveIndex === i && el) {
-                            el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                          }
-                        }}
-                        className={clsx(
-                          "text-left px-2 py-1 font-medium flex items-center gap-2 hover:bg-[#363431] transition-colors relative",
-                          currentMoveIndex === i
-                            ? "bg-[#4887C8] text-white hover:bg-[#4887C8]"
-                            : (i % 2 === 0 ? "text-[#C3C3C3]" : "text-[#C3C3C3]"),
-                          // Alternate row background for the whole row? 
-                          // The image shows solid black background for the list, with rows not really distinctively striped, 
-                          // but the active move is blue. 
-                          // The provided image has row numbers with a darker background than the move cells potentially?
-                          // Let's stick to the dark theme.
-                        )}
-                        onClick={() => jumpToMove(i)}
-                      >
-                        <span className={clsx(
-                          // Adjust font size/weight
-                          // The image shows bold white-ish text for moves
-                        )}>{move.san}</span>
-
-                        {/* Evaluation/Classification Badge */}
-                        {moveAnalyses[i]?.classification && (
-                          <span className={clsx(
-                            "ml-auto text-[10px] px-1 rounded-sm font-bold uppercase",
-                            currentMoveIndex === i ? "text-white/90" : (
-                              moveAnalyses[i].classification === 'good' ? "text-[#95b545]" :
-                                moveAnalyses[i].classification === 'inaccuracy' ? "text-[#e8ae05]" :
-                                  moveAnalyses[i].classification === 'mistake' ? "text-[#f29f05]" :
-                                    moveAnalyses[i].classification === 'blunder' ? "text-[#ca3431]" : ""
-                            )
-                          )}>
-                            {moveAnalyses[i].classification === 'good' && ''} {/* Don't show star for good, maybe clutter */}
-                            {moveAnalyses[i].classification === 'inaccuracy' && '?!'}
-                            {moveAnalyses[i].classification === 'mistake' && '?'}
-                            {moveAnalyses[i].classification === 'blunder' && '??'}
-                          </span>
-                        )}
-                      </button>
-                    </React.Fragment>
-                  ))}
-
-                  {/* Filler if black hasn't moved yet in the last row */}
-                  {history.length % 2 !== 0 && (
-                    <div className="bg-[#262421]"></div>
-                  )}
+                    return (
+                      <div key={rowIdx} className="table-row">
+                        <div className="table-cell p-2 text-center text-[#747474] font-mono bg-[#21201D] border-b border-[#3C3B39] align-text-top pt-3">
+                          {rowIdx + 1}.
+                        </div>
+                        {renderMoveCell(whiteMove, whiteMoveIdx, whiteAnalysis)}
+                        {renderMoveCell(blackMove, blackMoveIdx, blackAnalysis)}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
