@@ -18,6 +18,11 @@ const app = initializeApp(firebaseConfig);
 // Initialize Firestore
 export const db = getFirestore(app);
 
+// Initialize Auth
+import { getAuth, GoogleAuthProvider } from "firebase/auth";
+export const auth = getAuth(app);
+export const googleProvider = new GoogleAuthProvider();
+
 // Collection reference
 export const puzzlesCollection = collection(db, 'puzzles');
 

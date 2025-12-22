@@ -54,7 +54,23 @@ function Card({ children, className, title, icon: Icon, action }) {
 }
 
 // --- Main App Component ---
+import { auth } from './config/firebase';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import LoginPage from './components/LoginPage';
+
 function App() {
+  // Auth State
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
   // Game State
   const gameRef = useRef(new Chess());
   const [fen, setFen] = useState(gameRef.current.fen());
@@ -1029,6 +1045,18 @@ function App() {
   };
 
   // --- Render ---
+  if (authLoading) {
+    return (
+      <div className="h-screen w-full bg-gray-900 flex items-center justify-center text-primary">
+        <Cpu className="animate-spin" size={48} />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginPage />;
+  }
+
   return (
     <div className="h-screen w-full bg-gray-900 text-gray-100 flex flex-col overflow-hidden">
       {/* Header */}
@@ -1038,6 +1066,23 @@ function App() {
           <h1 className="text-xl font-bold tracking-tight">AI Chess Analyzer</h1>
         </div>
         <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 px-3 py-1 bg-gray-800 rounded-full border border-gray-700">
+            {user.photoURL ? (
+              <img src={user.photoURL} alt="Profile" className="w-6 h-6 rounded-full" />
+            ) : (
+              <div className="w-6 h-6 bg-primary rounded-full flex items-center justify-center text-xs font-bold text-white">
+                {user.email[0].toUpperCase()}
+              </div>
+            )}
+            <span className="text-sm font-medium text-gray-300 hidden md:block">{user.displayName || user.email}</span>
+            <button
+              onClick={() => signOut(auth)}
+              className="text-xs text-red-400 hover:text-red-300 ml-2 font-semibold"
+            >
+              Sign Out
+            </button>
+          </div>
+          <div className="h-6 w-px bg-gray-800 hidden md:block"></div>
           <label className="flex items-center gap-2 text-sm text-gray-300 mr-4 cursor-pointer">
             <input
               type="checkbox"
