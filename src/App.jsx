@@ -226,9 +226,11 @@ function App() {
 
   // --- Game Logic ---
   function makeMove(move) {
+    console.log("Attempting move:", move);
     try {
       const game = gameRef.current;
       const result = game.move(move);
+      console.log("Move result:", result);
 
       if (result) {
         setFen(game.fen());
@@ -298,8 +300,8 @@ function App() {
       newSquares[move.to] = {
         background:
           game.get(move.to) && game.get(move.to)?.color !== game.get(square)?.color
-            ? 'radial-gradient(circle, rgba(0,0,0,.1) 85%, transparent 85%)' // larger circle for capturing
-            : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)', // smaller circle for moving
+            ? 'radial-gradient(circle, rgba(0, 0, 255, 0.5) 85%, transparent 85%)' // larger blue circle for capturing
+            : 'radial-gradient(circle, rgba(0, 0, 255, 0.5) 25%, transparent 25%)', // smaller blue circle for moving
         borderRadius: '50%'
       };
     }
@@ -319,6 +321,7 @@ function App() {
   // square clicked to move to, check if valid move
   const game = gameRef.current;
   function onSquareClick(square) {
+    console.log("onSquareClick:", square, "moveFrom:", moveFrom);
     if (!moveFrom) {
       const piece = game.get(square);
       if (!piece) return;
@@ -330,6 +333,8 @@ function App() {
 
     const moves = game.moves({ square: moveFrom, verbose: true });
     const foundMove = moves.find(m => m.from === moveFrom && m.to === square);
+
+    console.log("Found move?", foundMove);
 
     if (!foundMove) {
       const hasMoveOptions = getMoveOptions(square);
@@ -388,8 +393,8 @@ function App() {
       setRightClickStart(square);
     } else {
       // Left click clears arrows often
-      setManualArrows([]);
-      setRightClickStart(null);
+      if (manualArrows.length > 0) setManualArrows([]);
+      if (rightClickStart) setRightClickStart(null);
     }
   };
 
@@ -1066,69 +1071,140 @@ function App() {
       {/* Analysis Summary Modal */}
       {showAnalysisSummary && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-gray-800 rounded-lg shadow-2xl border border-gray-700 w-[600px] flex flex-col max-h-[80vh]">
+          <div className="bg-gray-800 rounded-lg shadow-2xl border border-gray-700 w-[800px] flex flex-col max-h-[85vh]">
             <div className="p-4 border-b border-gray-700 flex justify-between items-center">
               <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                <Cpu className="text-primary" /> Analysis Complete
+                <Cpu className="text-primary" /> Analysis Report
               </h3>
               <button onClick={() => setShowAnalysisSummary(false)} className="text-gray-400 hover:text-white">
                 <X size={20} />
               </button>
             </div>
+
             <div className="p-6 overflow-y-auto">
-              <div className="grid grid-cols-3 gap-4 mb-6">
-                {[
-                  { label: 'Good Moves', count: Object.values(moveAnalyses).filter(a => a.classification === 'good').length, color: 'text-green-400', icon: CheckCircle },
-                  { label: 'Mistakes', count: Object.values(moveAnalyses).filter(a => a.classification === 'mistake').length, color: 'text-orange-400', icon: HelpCircle },
-                  { label: 'Blunders', count: Object.values(moveAnalyses).filter(a => a.classification === 'blunder').length, color: 'text-red-500', icon: AlertTriangle },
-                ].map((stat, i) => (
-                  <div key={i} className="bg-gray-700/50 p-4 rounded-lg flex flex-col items-center border border-gray-700">
-                    <stat.icon size={24} className={`mb-2 ${stat.color}`} />
-                    <span className="text-3xl font-bold text-white">{stat.count}</span>
-                    <span className="text-xs text-gray-400 uppercase tracking-wider">{stat.label}</span>
-                  </div>
-                ))}
-              </div>
+              <div className="flex gap-6">
+                {/* White Player Stats */}
+                <div className="flex-1">
+                  <h4 className="font-bold text-gray-200 mb-4 border-b border-gray-700 pb-2 text-center">White Player</h4>
+                  <div className="grid grid-cols-1 gap-3 mb-6">
+                    {[
+                      { label: 'Good Moves', type: 'good', color: 'text-green-400', icon: CheckCircle },
+                      { label: 'Mistakes', type: 'mistake', color: 'text-orange-400', icon: HelpCircle },
+                      { label: 'Blunders', type: 'blunder', color: 'text-red-500', icon: AlertTriangle },
+                    ].map((statType) => {
+                      const count = Object.entries(moveAnalyses).filter(([idx, a]) =>
+                        parseInt(idx) % 2 === 0 && a.classification === statType.type
+                      ).length;
 
-              <h4 className="font-bold text-gray-300 mb-3">Key Moments</h4>
-              <div className="space-y-3">
-                {Object.entries(moveAnalyses)
-                  .filter(([_, a]) => a.classification === 'mistake' || a.classification === 'blunder')
-                  .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
-                  .map(([idx, analysis]) => {
-                    const moveNum = Math.floor(parseInt(idx) / 2) + 1;
-                    const isWhite = parseInt(idx) % 2 === 0;
-                    // Need to get the actual move SAN from history
-                    const moveSan = history[parseInt(idx)]?.san || '???';
-
-                    return (
-                      <div key={idx} className="bg-gray-900/50 p-3 rounded border border-gray-700 flex items-start gap-3 hover:bg-gray-900 transition-colors cursor-pointer" onClick={() => {
-                        jumpToMove(parseInt(idx));
-                        setShowAnalysisSummary(false);
-                      }}>
-                        <div className="mt-1">
-                          {analysis.classification === 'blunder'
-                            ? <AlertTriangle className="text-red-500" size={16} />
-                            : <HelpCircle className="text-orange-400" size={16} />}
-                        </div>
-                        <div>
-                          <div className="text-sm font-semibold text-gray-200">
-                            Move {moveNum}{isWhite ? '.' : '...'} {moveSan} <span className={analysis.classification === 'blunder' ? "text-red-500" : "text-orange-400"}>
-                              {analysis.classification === 'blunder' ? 'Blunder' : 'Mistake'}
-                            </span>
+                      return (
+                        <div key={statType.label} className="bg-gray-700/30 p-3 rounded flex items-center justify-between border border-gray-700 px-4">
+                          <div className="flex items-center gap-2">
+                            <statType.icon size={18} className={statType.color} />
+                            <span className="text-sm text-gray-300">{statType.label}</span>
                           </div>
-                          {analysis.bestMove && (
-                            <div className="text-xs text-gray-400 mt-1">
-                              Best was <span className="text-primary font-bold">{analysis.bestMove}</span>
-                            </div>
-                          )}
+                          <span className="text-xl font-bold text-white">{count}</span>
                         </div>
-                      </div>
-                    );
-                  })}
-                {Object.values(moveAnalyses).filter(a => a.classification === 'mistake' || a.classification === 'blunder').length === 0 && (
-                  <div className="text-center text-gray-500 italic py-4">No significant errors found. Great game!</div>
-                )}
+                      )
+                    })}
+                  </div>
+
+                  {/* White Key Moments */}
+                  <h5 className="font-semibold text-gray-400 text-sm mb-2">Key Moments (White)</h5>
+                  <div className="space-y-2">
+                    {Object.entries(moveAnalyses)
+                      .filter(([idx, a]) => parseInt(idx) % 2 === 0 && (a.classification === 'mistake' || a.classification === 'blunder'))
+                      .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+                      .map(([idx, analysis]) => {
+                        const moveNum = Math.floor(parseInt(idx) / 2) + 1;
+                        const moveSan = history[parseInt(idx)]?.san || '???';
+                        return (
+                          <div key={idx} className="bg-gray-900/50 p-2 rounded border border-gray-700 flex flex-col gap-1 hover:bg-gray-900 transition-colors cursor-pointer" onClick={() => {
+                            jumpToMove(parseInt(idx));
+                            setShowAnalysisSummary(false);
+                          }}>
+                            <div className="flex items-center gap-2 text-sm">
+                              <span className="text-gray-400 font-mono w-8">{moveNum}.</span>
+                              <span className="font-bold text-gray-200">{moveSan}</span>
+                              <span className={analysis.classification === 'blunder' ? "text-red-500 text-xs font-bold uppercase" : "text-orange-400 text-xs font-bold uppercase"}>
+                                {analysis.classification}
+                              </span>
+                            </div>
+                            {analysis.bestMove && (
+                              <div className="text-xs text-gray-500 pl-10">
+                                Best: <span className="text-primary">{analysis.bestMove}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    {Object.entries(moveAnalyses).filter(([idx, a]) => parseInt(idx) % 2 === 0 && (a.classification === 'mistake' || a.classification === 'blunder')).length === 0 && (
+                      <div className="text-xs text-gray-500 italic text-center py-2">No significant errors</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Vertical Divider */}
+                <div className="w-px bg-gray-700"></div>
+
+                {/* Black Player Stats */}
+                <div className="flex-1">
+                  <h4 className="font-bold text-gray-200 mb-4 border-b border-gray-700 pb-2 text-center">Black Player</h4>
+                  <div className="grid grid-cols-1 gap-3 mb-6">
+                    {[
+                      { label: 'Good Moves', type: 'good', color: 'text-green-400', icon: CheckCircle },
+                      { label: 'Mistakes', type: 'mistake', color: 'text-orange-400', icon: HelpCircle },
+                      { label: 'Blunders', type: 'blunder', color: 'text-red-500', icon: AlertTriangle },
+                    ].map((statType) => {
+                      const count = Object.entries(moveAnalyses).filter(([idx, a]) =>
+                        parseInt(idx) % 2 !== 0 && a.classification === statType.type
+                      ).length;
+
+                      return (
+                        <div key={statType.label} className="bg-gray-700/30 p-3 rounded flex items-center justify-between border border-gray-700 px-4">
+                          <div className="flex items-center gap-2">
+                            <statType.icon size={18} className={statType.color} />
+                            <span className="text-sm text-gray-300">{statType.label}</span>
+                          </div>
+                          <span className="text-xl font-bold text-white">{count}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* Black Key Moments */}
+                  <h5 className="font-semibold text-gray-400 text-sm mb-2">Key Moments (Black)</h5>
+                  <div className="space-y-2">
+                    {Object.entries(moveAnalyses)
+                      .filter(([idx, a]) => parseInt(idx) % 2 !== 0 && (a.classification === 'mistake' || a.classification === 'blunder'))
+                      .sort((a, b) => parseInt(a[0]) - parseInt(b[0]))
+                      .map(([idx, analysis]) => {
+                        const moveNum = Math.floor(parseInt(idx) / 2) + 1;
+                        const moveSan = history[parseInt(idx)]?.san || '???';
+                        return (
+                          <div key={idx} className="bg-gray-900/50 p-2 rounded border border-gray-700 flex flex-col gap-1 hover:bg-gray-900 transition-colors cursor-pointer" onClick={() => {
+                            jumpToMove(parseInt(idx));
+                            setShowAnalysisSummary(false);
+                          }}>
+                            <div className="flex items-center gap-2 text-sm">
+                              <span className="text-gray-400 font-mono w-8">{moveNum}...</span>
+                              <span className="font-bold text-gray-200">{moveSan}</span>
+                              <span className={analysis.classification === 'blunder' ? "text-red-500 text-xs font-bold uppercase" : "text-orange-400 text-xs font-bold uppercase"}>
+                                {analysis.classification}
+                              </span>
+                            </div>
+                            {analysis.bestMove && (
+                              <div className="text-xs text-gray-500 pl-10">
+                                Best: <span className="text-primary">{analysis.bestMove}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    {Object.entries(moveAnalyses).filter(([idx, a]) => parseInt(idx) % 2 !== 0 && (a.classification === 'mistake' || a.classification === 'blunder')).length === 0 && (
+                      <div className="text-xs text-gray-500 italic text-center py-2">No significant errors</div>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
             <div className="p-4 border-t border-gray-700 bg-gray-800/50 flex justify-end">
@@ -1529,15 +1605,22 @@ function App() {
         <div className="flex-1 bg-gray-950 flex flex-col items-center justify-center p-4 relative">
           <div className="w-full h-full flex flex-col items-center justify-center">
             <div
-              className="w-full max-w-[500px] aspect-square shadow-2xl shadow-black/50 rounded-lg border-4 border-gray-800 bg-[#b58863] relative"
-              onContextMenu={handleBoardContextMenu}
-              onMouseDown={handleBoardMouseDown}
-              onMouseUp={handleBoardMouseUp}
+              className="w-full max-w-[500px] shadow-2xl shadow-black/50 rounded-lg bg-[#b58863] relative"
             >
               {/* Use Custom Wrapper */}
-              <ChessboardJS {...chessboardOptions} width={500} />
+              <ChessboardJS
+                fen={fen}
+                orientation={orientation}
+                draggable={true}
+                onDrop={onDrop}
+                width={500}
+              />
               <ArrowOverlay
                 arrows={[
+                  ...(appMode !== 'puzzle' && !playMode && engineArrow ? [[engineArrow]] : []), // Wrap in extra array? No, engineArrow is object {from,to,color}, state logic for react-chessboard was different? 
+                  // Let's check engineArrow structure.
+                  // setEngineArrow({ from, to, color: 'rgba(0, 255, 0, 0.6)' });
+                  // ArrowOverlay expects array of objects {from, to, color}
                   ...(appMode !== 'puzzle' && !playMode && engineArrow ? [engineArrow] : []),
                   ...manualArrows
                 ]}
