@@ -57,6 +57,19 @@ export default function LoginPage({ onLogin }) {
                     Sign in with Google
                 </button>
 
+                <div className="flex items-center w-full gap-4">
+                    <div className="flex-1 h-px bg-gray-700"></div>
+                    <span className="text-gray-500 text-sm">OR</span>
+                    <div className="flex-1 h-px bg-gray-700"></div>
+                </div>
+
+                <button
+                    onClick={() => onLogin({ isGuest: true, displayName: 'Guest User' })}
+                    className="w-full bg-gray-700 hover:bg-gray-600 text-white font-semibold py-3 px-4 rounded transition-colors"
+                >
+                    Continue as Guest
+                </button>
+
                 {error && (
                     <div className="text-red-400 text-sm bg-red-900/30 p-2 rounded w-full">
                         {error}

@@ -13,6 +13,7 @@ import { twMerge } from 'tailwind-merge';
 import puzzlesData from './data/puzzles.json';
 import { usePuzzles } from './hooks/usePuzzles';
 import PuzzleSelector from './components/PuzzleSelector';
+import FeedbackModal from './components/FeedbackModal';
 
 // --- Utility Components ---
 function Button({ children, onClick, variant = 'primary', className, disabled }) {
@@ -65,11 +66,13 @@ function App() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      // If we are already in guest mode, don't overwrite with null from firebase
+      if (!currentUser && user?.isGuest) return;
       setUser(currentUser);
       setAuthLoading(false);
     });
     return () => unsubscribe();
-  }, []);
+  }, [user]);
 
   // Game State
   const gameRef = useRef(new Chess());
@@ -98,6 +101,7 @@ function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   // Load Game Tray State
   const [showLoadGameTray, setShowLoadGameTray] = useState(false);
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
 
   // Firebase Puzzle Integration
   const {
@@ -1054,7 +1058,7 @@ function App() {
   }
 
   if (!user) {
-    return <LoginPage />;
+    return <LoginPage onLogin={setUser} />;
   }
 
   return (
@@ -1070,13 +1074,21 @@ function App() {
             {user.photoURL ? (
               <img src={user.photoURL} alt="Profile" className="w-6 h-6 rounded-full" />
             ) : (
-              <div className="w-6 h-6 bg-primary rounded-full flex items-center justify-center text-xs font-bold text-white">
-                {user.email[0].toUpperCase()}
+              <div className="w-6 h-6 bg-primary rounded-full flex items-center justify-center text-xs font-bold text-white uppercase">
+                {(user.displayName || user.email || 'G')[0]}
               </div>
             )}
-            <span className="text-sm font-medium text-gray-300 hidden md:block">{user.displayName || user.email}</span>
+            <span className="text-sm font-medium text-gray-300 hidden md:block">
+              {user.displayName || user.email || 'Guest User'}
+            </span>
             <button
-              onClick={() => signOut(auth)}
+              onClick={() => {
+                if (user.isGuest) {
+                  setUser(null);
+                } else {
+                  signOut(auth);
+                }
+              }}
               className="text-xs text-red-400 hover:text-red-300 ml-2 font-semibold"
             >
               Sign Out
@@ -1092,9 +1104,17 @@ function App() {
             />
             Show Animations
           </label>
-          <Button variant="ghost" onClick={() => setShowApiKeyInput(!showApiKeyInput)}>
+          <Button variant="ghost" onClick={() => setShowApiKeyInput(!showApiKeyInput)} title="Settings">
             <Settings size={18} />
             {apiKey ? 'API Key Set' : 'Set API Key'}
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => setShowFeedbackModal(true)}
+            className="text-gray-400 hover:text-primary transition-colors"
+            title="Send Feedback"
+          >
+            <MessageSquare size={18} />
           </Button>
         </div>
       </header>
@@ -1782,6 +1802,10 @@ function App() {
         </div >
 
       </main >
+
+      {showFeedbackModal && (
+        <FeedbackModal onClose={() => setShowFeedbackModal(false)} />
+      )}
     </div >
   );
 }
