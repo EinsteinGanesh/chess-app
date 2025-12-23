@@ -14,6 +14,7 @@ import puzzlesData from './data/puzzles.json';
 import { usePuzzles } from './hooks/usePuzzles';
 import PuzzleSelector from './components/PuzzleSelector';
 import FeedbackModal from './components/FeedbackModal';
+import { Analytics } from '@vercel/analytics/react';
 
 // --- Utility Components ---
 function Button({ children, onClick, variant = 'primary', className, disabled }) {
@@ -1806,6 +1807,7 @@ function App() {
       {showFeedbackModal && (
         <FeedbackModal onClose={() => setShowFeedbackModal(false)} />
       )}
+      <Analytics />
     </div >
   );
 }
